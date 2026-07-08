@@ -1,0 +1,31 @@
+name: Sync Open Food Facts to Firestore
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Runs daily at 4:00 AM Singapore time
+    # 20:00 UTC = 4:00 AM Singapore time
+    - cron: "0 20 * * *"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Sync Open Food Facts products to Firestore
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          MAX_FIRESTORE_WRITES_PER_RUN: ${{ secrets.MAX_FIRESTORE_WRITES_PER_RUN }}
+          OPEN_FOOD_FACTS_USER_AGENT: ${{ secrets.OPEN_FOOD_FACTS_USER_AGENT }}
+        run: npm run sync:off
