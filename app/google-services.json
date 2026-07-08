@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1065975376334",
+    "project_id": "foodfitscan",
+    "storage_bucket": "foodfitscan.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1065975376334:android:5f483a1674126828f2e39f",
+        "android_client_info": {
+          "package_name": "com.sephylon.foodfitscan"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDKMWCUwHeFEIsq44x8VfEO19vom8w01j4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
