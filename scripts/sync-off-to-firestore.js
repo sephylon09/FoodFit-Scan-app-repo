@@ -1,4 +1,5 @@
-const admin = require("firebase-admin");
+const { initializeApp, cert } = require("firebase-admin/app");
+const { getFirestore } = require("firebase-admin/firestore");
 
 const COLLECTION_NAME = "product_search_index";
 const DEFAULT_MAX_WRITES = 18000;
@@ -79,11 +80,11 @@ function initializeFirebase() {
   const serviceAccountJson = requireEnv("FIREBASE_SERVICE_ACCOUNT");
   const serviceAccount = JSON.parse(serviceAccountJson);
 
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
+  initializeApp({
+    credential: cert(serviceAccount),
   });
 
-  return admin.firestore();
+  return getFirestore();
 }
 
 async function fetchOpenFoodFactsPage(page, userAgent) {
