@@ -1,0 +1,27 @@
+name: Sync Open Food Facts CSV to Firestore
+
+on:
+  workflow_dispatch:
+
+jobs:
+  sync-csv:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Sync Open Food Facts CSV products to Firestore
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          MAX_FIRESTORE_WRITES_PER_RUN: ${{ secrets.MAX_FIRESTORE_WRITES_PER_RUN }}
+          OPEN_FOOD_FACTS_USER_AGENT: ${{ secrets.OPEN_FOOD_FACTS_USER_AGENT }}
+        run: npm run sync:off-csv
