@@ -201,7 +201,16 @@ async function main() {
       break;
     }
 
-    const data = await fetchOpenFoodFactsPage(page, userAgent);
+    let data;
+
+    try {
+      data = await fetchOpenFoodFactsPage(page, userAgent);
+    } catch (error) {
+      console.log(`Stopping sync early on page ${page}: ${error.message}`);
+      console.log(`Products already written this run: ${totalWritten}`);
+      break;
+    }
+
     const products = Array.isArray(data.products) ? data.products : [];
 
     if (products.length === 0) {
