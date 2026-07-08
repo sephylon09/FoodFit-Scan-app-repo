@@ -16,6 +16,10 @@ const DEFAULT_MAX_WRITES = 18000;
 // Safety limit so the script does not run forever in GitHub Actions.
 const MAX_ROWS_TO_SCAN_PER_RUN = 1500000;
 
+const BATCH_COMMIT_SIZE = 450;
+const SCAN_LOG_INTERVAL = 50000;
+const CURSOR_SKIP_LOG_INTERVAL = 250000;
+
 function requireEnv(name) {
   const value = process.env[name];
   if (!value || value.trim().length === 0) {
@@ -201,12 +205,6 @@ async function saveSyncState(db, state) {
   );
 }
 
-async function commitBatch(batch, count) {
-  if (count > 0) {
-    await batch.commit();
-  }
-}
-
 async function runCsvSync() {
   const db = initializeFirebase();
   const userAgent = requireEnv("OPEN_FOOD_FACTS_USER_AGENT");
@@ -228,145 +226,151 @@ async function runCsvSync() {
   let matchedSingapore = 0;
   let written = 0;
   let skipped = 0;
-  let batch = db.batch();
-  let batchCount = 0;
+  let batchesCommitted = 0;
   let stoppedBecauseWriteLimit = false;
   let stoppedBecauseRowLimit = false;
+  let streamError = null;
 
-  return new Promise((resolve, reject) => {
-    openUrlWithRedirects(CSV_URL, userAgent)
-      .then((response) => {
-        if (response.statusCode !== 200) {
-          reject(new Error(`CSV download failed with HTTP ${response.statusCode}`));
-          return;
+  let batch = db.batch();
+  let batchCount = 0;
+
+  // Swaps in a fresh batch before awaiting the commit, so no code path can
+  // ever call set() on — or re-commit — a batch whose commit has started.
+  async function commitCurrentBatch(label) {
+    const committingBatch = batch;
+    const committingCount = batchCount;
+
+    batch = db.batch();
+    batchCount = 0;
+
+    if (committingCount === 0) {
+      return;
+    }
+
+    try {
+      await committingBatch.commit();
+    } catch (error) {
+      error.isFirestoreCommitFailure = true;
+      throw error;
+    }
+
+    batchesCommitted++;
+    console.log(
+      `Committed ${label} batch #${batchesCommitted} (${committingCount} writes): row=${rowNumber}, scanned=${scannedThisRun}, singapore=${matchedSingapore}, written=${written}`
+    );
+  }
+
+  const response = await openUrlWithRedirects(CSV_URL, userAgent);
+  const gunzip = zlib.createGunzip();
+  const rows = response.pipe(gunzip).pipe(
+    csv({
+      separator: "\t",
+      mapHeaders: ({ header }) => header.trim(),
+    })
+  );
+
+  try {
+    // Rows are processed strictly one at a time: `for await` does not pull the
+    // next row until this iteration (including any batch commit) finishes.
+    for await (const row of rows) {
+      rowNumber++;
+
+      if (rowNumber <= startAfterRow) {
+        if (rowNumber % CURSOR_SKIP_LOG_INTERVAL === 0) {
+          console.log(`Skipping to cursor: row=${rowNumber} of ${startAfterRow}`);
         }
+        continue;
+      }
 
-        response
-          .pipe(zlib.createGunzip())
-          .pipe(
-            csv({
-              separator: "\t",
-              mapHeaders: ({ header }) => header.trim(),
-            })
-          )
-          .on("data", async (row) => {
-            response.pause();
+      scannedThisRun++;
 
-            try {
-              rowNumber++;
+      if (scannedThisRun % SCAN_LOG_INTERVAL === 0) {
+        console.log(
+          `Progress: scanned=${scannedThisRun}, row=${rowNumber}, singapore=${matchedSingapore}, written=${written}, skipped=${skipped}`
+        );
+      }
 
-              if (rowNumber <= startAfterRow) {
-                response.resume();
-                return;
-              }
+      if (rowContainsSingapore(row)) {
+        matchedSingapore++;
 
-              scannedThisRun++;
+        const compact = compactProduct(row);
 
-              if (scannedThisRun > MAX_ROWS_TO_SCAN_PER_RUN) {
-                stoppedBecauseRowLimit = true;
-                response.destroy();
-                return;
-              }
+        if (!compact) {
+          skipped++;
+        } else {
+          const docRef = db.collection(COLLECTION_NAME).doc(compact.barcode);
+          batch.set(docRef, compact, { merge: true });
+          batchCount++;
+          written++;
 
-              if (!rowContainsSingapore(row)) {
-                response.resume();
-                return;
-              }
+          if (batchCount >= BATCH_COMMIT_SIZE) {
+            await commitCurrentBatch("progress");
+          }
+        }
+      }
 
-              matchedSingapore++;
+      if (written >= maxWrites) {
+        stoppedBecauseWriteLimit = true;
+        break;
+      }
 
-              const compact = compactProduct(row);
-              if (!compact) {
-                skipped++;
-                response.resume();
-                return;
-              }
+      if (scannedThisRun >= MAX_ROWS_TO_SCAN_PER_RUN) {
+        stoppedBecauseRowLimit = true;
+        break;
+      }
+    }
+  } catch (error) {
+    if (error && error.isFirestoreCommitFailure) {
+      // A failed commit means those writes were lost; fail the run without
+      // advancing the cursor so the rows are re-scanned next time.
+      throw error;
+    }
 
-              const docRef = db.collection(COLLECTION_NAME).doc(compact.barcode);
-              batch.set(docRef, compact, { merge: true });
-              batchCount++;
-              written++;
+    streamError = error;
+  } finally {
+    // Breaking out of `for await` destroys the CSV stream; also abort the
+    // download and the gunzip stage. No-ops if the stream ended normally.
+    response.destroy();
+    gunzip.destroy();
+  }
 
-              if (batchCount >= 450) {
-                await commitBatch(batch, batchCount);
-                batch = db.batch();
-                batchCount = 0;
+  await commitCurrentBatch("final");
 
-                console.log(
-                  `Progress: row=${rowNumber}, scanned=${scannedThisRun}, singapore=${matchedSingapore}, written=${written}`
-                );
-              }
+  const completedFullPass =
+    !stoppedBecauseWriteLimit && !stoppedBecauseRowLimit && streamError === null;
+  const nextRow = completedFullPass ? 0 : rowNumber;
 
-              if (written >= maxWrites) {
-                stoppedBecauseWriteLimit = true;
-                response.destroy();
-                return;
-              }
-
-              response.resume();
-            } catch (error) {
-              reject(error);
-            }
-          })
-          .on("end", async () => {
-            try {
-              await commitBatch(batch, batchCount);
-
-              const completedFullPass = !stoppedBecauseWriteLimit && !stoppedBecauseRowLimit;
-              const nextRow = completedFullPass ? 0 : rowNumber;
-
-              await saveSyncState(db, {
-                lastProcessedRow: nextRow,
-                totalSaved: Number(initialState.totalSaved || 0) + written,
-                completedFullPass,
-                lastResult: "success",
-                lastWritten: written,
-                lastSkipped: skipped,
-                lastMatchedSingapore: matchedSingapore,
-                lastScannedRows: scannedThisRun,
-              });
-
-              console.log("CSV sync complete.");
-              console.log(`Last processed row saved: ${nextRow}`);
-              console.log(`Scanned rows this run: ${scannedThisRun}`);
-              console.log(`Singapore rows matched: ${matchedSingapore}`);
-              console.log(`Written: ${written}`);
-              console.log(`Skipped: ${skipped}`);
-              console.log(`Completed full pass: ${completedFullPass}`);
-
-              resolve();
-            } catch (error) {
-              reject(error);
-            }
-          })
-          .on("error", async (error) => {
-            try {
-              await commitBatch(batch, batchCount);
-
-              await saveSyncState(db, {
-                lastProcessedRow: rowNumber,
-                totalSaved: Number(initialState.totalSaved || 0) + written,
-                completedFullPass: false,
-                lastResult: "stopped_or_error",
-                lastError: error.message,
-                lastWritten: written,
-                lastSkipped: skipped,
-                lastMatchedSingapore: matchedSingapore,
-                lastScannedRows: scannedThisRun,
-              });
-
-              console.log(`CSV stream stopped: ${error.message}`);
-              console.log(`Saved cursor at row: ${rowNumber}`);
-              console.log(`Written before stop: ${written}`);
-
-              resolve();
-            } catch (saveError) {
-              reject(saveError);
-            }
-          });
-      })
-      .catch(reject);
+  await saveSyncState(db, {
+    lastProcessedRow: nextRow,
+    totalSaved: Number(initialState.totalSaved || 0) + written,
+    completedFullPass,
+    lastResult: streamError ? "stopped_or_error" : "success",
+    ...(streamError ? { lastError: streamError.message } : {}),
+    lastWritten: written,
+    lastSkipped: skipped,
+    lastMatchedSingapore: matchedSingapore,
+    lastScannedRows: scannedThisRun,
   });
+
+  if (stoppedBecauseWriteLimit) {
+    console.log(`Stopped early: reached max writes for this run (${maxWrites}).`);
+  }
+
+  if (stoppedBecauseRowLimit) {
+    console.log(`Stopped early: reached max rows to scan for this run (${MAX_ROWS_TO_SCAN_PER_RUN}).`);
+  }
+
+  if (streamError) {
+    console.log(`CSV stream stopped: ${streamError.message}`);
+  }
+
+  console.log("CSV sync complete.");
+  console.log(`Last processed row saved: ${nextRow}`);
+  console.log(`Scanned rows this run: ${scannedThisRun}`);
+  console.log(`Singapore rows matched: ${matchedSingapore}`);
+  console.log(`Written: ${written}`);
+  console.log(`Skipped: ${skipped}`);
+  console.log(`Completed full pass: ${completedFullPass}`);
 }
 
 runCsvSync().catch((error) => {
