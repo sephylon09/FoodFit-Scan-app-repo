@@ -87,6 +87,10 @@ function initializeFirebase() {
   return getFirestore();
 }
 
+async function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function fetchOpenFoodFactsPage(page, userAgent) {
   const url = new URL("https://world.openfoodfacts.org/api/v2/search");
 
@@ -103,20 +107,37 @@ async function fetchOpenFoodFactsPage(page, userAgent) {
       "last_modified_t",
     ].join(",")
   );
-  url.searchParams.set("page_size", String(PAGE_SIZE));
+  url.searchParams.set("page_size", "50");
   url.searchParams.set("page", String(page));
 
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent": userAgent,
-    },
-  });
+  const maxAttempts = 4;
 
-  if (!response.ok) {
-    throw new Error(`Open Food Facts request failed on page ${page}: ${response.status}`);
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": userAgent,
+        "Accept": "application/json",
+      },
+    });
+
+    if (response.ok) {
+      return response.json();
+    }
+
+    const retryable = response.status === 429 || response.status === 500 || response.status === 502 || response.status === 503 || response.status === 504;
+
+    console.log(
+      `Open Food Facts page ${page} attempt ${attempt}/${maxAttempts} failed with HTTP ${response.status}`
+    );
+
+    if (!retryable || attempt === maxAttempts) {
+      throw new Error(`Open Food Facts request failed on page ${page}: ${response.status}`);
+    }
+
+    const waitMs = attempt * 5000;
+    console.log(`Waiting ${waitMs}ms before retry...`);
+    await sleep(waitMs);
   }
-
-  return response.json();
 }
 
 async function commitBatch(batch, count) {
