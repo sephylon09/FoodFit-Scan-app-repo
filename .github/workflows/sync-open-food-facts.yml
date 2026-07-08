@@ -2,6 +2,9 @@ name: Sync Open Food Facts to Firestore
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/sync-open-food-facts.yml"
   schedule:
     # Runs daily at 4:00 AM Singapore time
     # 20:00 UTC = 4:00 AM Singapore time
