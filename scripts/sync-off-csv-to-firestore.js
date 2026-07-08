@@ -35,6 +35,59 @@ function getMaxWrites() {
   return Math.min(parsed, DEFAULT_MAX_WRITES);
 }
 
+function openUrlWithRedirects(url, userAgent, redirectCount = 0) {
+  const maxRedirects = 5;
+
+  return new Promise((resolve, reject) => {
+    const request = https.get(
+      url,
+      {
+        headers: {
+          "User-Agent": userAgent,
+          Accept: "text/csv, text/plain, */*",
+        },
+      },
+      (response) => {
+        const statusCode = response.statusCode || 0;
+
+        if ([301, 302, 303, 307, 308].includes(statusCode)) {
+          const location = response.headers.location;
+
+          if (!location) {
+            reject(new Error(`CSV download redirected with HTTP ${statusCode} but no Location header`));
+            return;
+          }
+
+          if (redirectCount >= maxRedirects) {
+            reject(new Error(`CSV download exceeded ${maxRedirects} redirects`));
+            return;
+          }
+
+          const redirectedUrl = new URL(location, url).toString();
+          console.log(`CSV download redirected: ${statusCode} → ${redirectedUrl}`);
+
+          response.resume();
+
+          openUrlWithRedirects(redirectedUrl, userAgent, redirectCount + 1)
+            .then(resolve)
+            .catch(reject);
+
+          return;
+        }
+
+        if (statusCode !== 200) {
+          reject(new Error(`CSV download failed with HTTP ${statusCode}`));
+          return;
+        }
+
+        resolve(response);
+      }
+    );
+
+    request.on("error", reject);
+  });
+}
+
 function initializeFirebase() {
   const serviceAccountJson = requireEnv("FIREBASE_SERVICE_ACCOUNT");
   const serviceAccount = JSON.parse(serviceAccountJson);
@@ -74,6 +127,7 @@ function buildPrefixes(name, brand) {
 
 function splitTags(value) {
   if (!value) return [];
+
   return String(value)
     .split(",")
     .map((tag) => tag.trim())
@@ -180,15 +234,8 @@ async function runCsvSync() {
   let stoppedBecauseRowLimit = false;
 
   return new Promise((resolve, reject) => {
-    const request = https.get(
-      CSV_URL,
-      {
-        headers: {
-          "User-Agent": userAgent,
-          Accept: "text/csv, text/plain, */*",
-        },
-      },
-      (response) => {
+    openUrlWithRedirects(CSV_URL, userAgent)
+      .then((response) => {
         if (response.statusCode !== 200) {
           reject(new Error(`CSV download failed with HTTP ${response.statusCode}`));
           return;
@@ -266,7 +313,6 @@ async function runCsvSync() {
               await commitBatch(batch, batchCount);
 
               const completedFullPass = !stoppedBecauseWriteLimit && !stoppedBecauseRowLimit;
-
               const nextRow = completedFullPass ? 0 : rowNumber;
 
               await saveSyncState(db, {
@@ -318,10 +364,8 @@ async function runCsvSync() {
               reject(saveError);
             }
           });
-      }
-    );
-
-    request.on("error", reject);
+      })
+      .catch(reject);
   });
 }
 
