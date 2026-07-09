@@ -53,7 +53,19 @@ const MAX_CHUNKS_PER_RUN = 24;
 // The Open Food Facts CSV has ~200 columns; only these are read. Positions
 // come from the header row, so upstream column reordering is harmless.
 const REQUIRED_COLUMNS = ["code", "product_name", "countries_tags"];
-const OPTIONAL_COLUMNS = ["brands", "image_front_url", "categories_tags", "last_modified_t"];
+const OPTIONAL_COLUMNS = ["brands", "categories_tags", "last_modified_t"];
+
+// Image columns vary between OFF CSV exports (some exports drop
+// image_front_url entirely). imageUrl is taken from the first non-empty column
+// in this priority order; none of them is required.
+const IMAGE_COLUMN_PRIORITY = [
+  "image_front_url",
+  "image_url",
+  "image_front_small_url",
+  "image_small_url",
+  "image_front_thumb_url",
+  "image_thumb_url",
+];
 
 function requireEnv(name) {
   const value = process.env[name];
@@ -207,6 +219,23 @@ function rowMatchesCountry(row, countryTag) {
   return splitTags(row.countries_tags).includes(countryTag);
 }
 
+// First non-empty image column by IMAGE_COLUMN_PRIORITY, trimmed. Values that
+// are not http(s) URLs are skipped so a stray CSV value cannot become an
+// imageUrl the app would then fail to load silently. Null when nothing usable.
+function getBestImageUrl(row) {
+  for (const column of IMAGE_COLUMN_PRIORITY) {
+    const raw = row[column];
+    if (raw === undefined || raw === null) continue;
+
+    const trimmed = String(raw).trim();
+    if (!trimmed) continue;
+    if (!/^https?:\/\//i.test(trimmed)) continue;
+
+    return trimmed;
+  }
+  return null;
+}
+
 function compactProduct(row, matchedCountryTag) {
   const barcode = String(row.code || "").trim();
   const name = String(row.product_name || "").trim();
@@ -223,7 +252,7 @@ function compactProduct(row, matchedCountryTag) {
     barcode,
     name,
     brand,
-    imageUrl: row.image_front_url || null,
+    imageUrl: getBestImageUrl(row),
     countryTags,
     categoriesTags,
     searchName: normalizeText(`${name} ${brand || ""}`),
@@ -233,6 +262,18 @@ function compactProduct(row, matchedCountryTag) {
     lastModifiedFromApi: row.last_modified_t ? Number(row.last_modified_t) : null,
     updatedAt: Date.now(),
   };
+}
+
+// Firestore write payload for a compact product document. imageUrl is dropped
+// when empty so a merge:true write can never overwrite an image an earlier
+// pass (or the API sync) already stored with null; every other field is
+// written as-is.
+function buildWritePayload(compact) {
+  const payload = { ...compact };
+  if (payload.imageUrl === null || payload.imageUrl === undefined) {
+    delete payload.imageUrl;
+  }
+  return payload;
 }
 
 // The OFF export is tab-separated with no quoting, so lines are split on
@@ -266,6 +307,14 @@ function buildColumnIndexes(headerLine) {
     console.log(`Warning: CSV header is missing optional columns: ${missingOptional.join(", ")}`);
   }
 
+  const availableImageColumns = IMAGE_COLUMN_PRIORITY.filter((column) => indexes.has(column));
+  if (availableImageColumns.length > 0) {
+    console.log(`Available image columns: ${availableImageColumns.join(", ")}`);
+  } else {
+    console.log("Warning: CSV header has no known image columns; imageUrl will stay empty this pass.");
+  }
+  console.log(`Using image priority: ${IMAGE_COLUMN_PRIORITY.join(" > ")}`);
+
   return indexes;
 }
 
@@ -277,15 +326,20 @@ function parseRow(line, columnIndexes) {
     return index === undefined ? undefined : fields[index];
   };
 
-  return {
+  const row = {
     code: field("code"),
     product_name: field("product_name"),
     brands: field("brands"),
-    image_front_url: field("image_front_url"),
     countries_tags: field("countries_tags"),
     categories_tags: field("categories_tags"),
     last_modified_t: field("last_modified_t"),
   };
+
+  for (const column of IMAGE_COLUMN_PRIORITY) {
+    row[column] = field(column);
+  }
+
+  return row;
 }
 
 async function getRotationState(db) {
@@ -585,7 +639,10 @@ async function processCountryStream(db, options) {
             skippedThisCountry++;
           } else {
             const docRef = db.collection(COLLECTION_NAME).doc(compact.barcode);
-            batch.set(docRef, compact, { merge: true });
+            // merge:true updates existing docs in place, so imageUrl backfills
+            // as rows are re-passed; buildWritePayload keeps a missing image
+            // from clobbering a stored one.
+            batch.set(docRef, buildWritePayload(compact), { merge: true });
             batchCount++;
             writtenThisChunk++;
             writtenThisCountry++;
@@ -686,12 +743,59 @@ async function processCountryStream(db, options) {
   };
 }
 
+// Manual image-backfill helper: rewinds every country cursor to row 0 (keeping
+// totals and rotation history) so the following chunks re-pass rows that were
+// imported before image support and merge imageUrl into those existing docs.
+// Never deletes documents; only the sync_state cursor doc is touched. Opt-in
+// via CSV_SYNC_RESET_CURSORS=true on a manual run — default behavior unchanged.
+async function resetRotationCursors(db) {
+  const ref = db.collection(SYNC_STATE_COLLECTION).doc(SYNC_STATE_DOC);
+  const snap = await ref.get();
+  const data = snap.exists ? snap.data() || {} : {};
+
+  const countryProgress =
+    data.countryProgress && typeof data.countryProgress === "object"
+      ? data.countryProgress
+      : {};
+
+  const resetProgress = {};
+  for (const [tag, progress] of Object.entries(countryProgress)) {
+    resetProgress[tag] = {
+      ...(progress && typeof progress === "object" ? progress : {}),
+      lastProcessedRow: 0,
+      completedFullPass: false,
+    };
+  }
+
+  await ref.set(
+    {
+      currentCountryIndex: 0,
+      currentCountryTag: COUNTRY_ROTATION[0],
+      currentCountryLastProcessedRow: 0,
+      countryProgress: resetProgress,
+      lastResult: "cursors_reset_for_backfill",
+      lastRunAt: Date.now(),
+    },
+    { merge: true }
+  );
+
+  console.log("Rotation cursors reset: upcoming chunks re-pass all rows (image backfill).");
+}
+
+function shouldResetCursors() {
+  return (process.env.CSV_SYNC_RESET_CURSORS || "").trim().toLowerCase() === "true";
+}
+
 async function runCsvSync() {
   const db = initializeFirebase();
   const userAgent = requireEnv("OPEN_FOOD_FACTS_USER_AGENT");
   const maxWrites = getMaxWrites();
   const maxRows = MAX_ROWS_TO_SCAN_PER_CHUNK;
   const chunksPerRun = getChunksPerRun();
+
+  if (shouldResetCursors()) {
+    await resetRotationCursors(db);
+  }
 
   const rawChunksRequested = Number.parseInt(
     process.env.CSV_SYNC_CHUNKS_PER_RUN || String(DEFAULT_CHUNKS_PER_RUN),
@@ -776,6 +880,7 @@ async function runCsvSync() {
 
 module.exports = {
   COUNTRY_ROTATION,
+  IMAGE_COLUMN_PRIORITY,
   normalizeCountryIndex,
   getChunksPerRun,
   openUrlWithRedirects,
@@ -783,7 +888,9 @@ module.exports = {
   buildPrefixes,
   splitTags,
   rowMatchesCountry,
+  getBestImageUrl,
   compactProduct,
+  buildWritePayload,
   buildColumnIndexes,
   parseRow,
   processCountryStream,

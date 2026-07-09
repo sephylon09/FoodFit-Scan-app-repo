@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -57,6 +58,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.sephylon.foodfitscan.domain.model.LookupStatus
 import com.sephylon.foodfitscan.domain.model.ScanHistoryItem
+import com.sephylon.foodfitscan.ui.theme.SuitabilityGoodContainer
+import com.sephylon.foodfitscan.ui.theme.SuitabilityOnGood
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -74,7 +77,7 @@ fun HistoryScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Scan History") },
+                title = { Text("History") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -210,8 +213,8 @@ private fun HistoryItemCard(
         modifier = Modifier
             .fillMaxWidth()
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
     ) {
         Row(
             modifier = Modifier.padding(12.dp),
@@ -300,24 +303,32 @@ private fun ProductThumbnail(imageUrl: String?, productName: String?, status: Lo
 @Composable
 private fun StatusBadge(status: LookupStatus) {
     val (bg, fg, label) = when (status) {
-        LookupStatus.FOUND -> Triple(Color(0xFF1E8449), Color.White, "Found")
+        LookupStatus.FOUND -> Triple(SuitabilityGoodContainer, SuitabilityOnGood, "Found")
         LookupStatus.NOT_FOUND -> Triple(
             MaterialTheme.colorScheme.surfaceVariant,
             MaterialTheme.colorScheme.onSurfaceVariant,
             "Not found",
         )
-        LookupStatus.NETWORK_ERROR -> Triple(Color(0xFFE67E22), Color.White, "Network error")
-        LookupStatus.UNKNOWN_ERROR -> Triple(Color(0xFFE74C3C), Color.White, "Error")
+        LookupStatus.NETWORK_ERROR -> Triple(
+            MaterialTheme.colorScheme.tertiaryContainer,
+            MaterialTheme.colorScheme.onTertiaryContainer,
+            "Network error",
+        )
+        LookupStatus.UNKNOWN_ERROR -> Triple(
+            MaterialTheme.colorScheme.errorContainer,
+            MaterialTheme.colorScheme.onErrorContainer,
+            "Error",
+        )
     }
     Surface(
         color = bg,
-        shape = RoundedCornerShape(4.dp),
+        shape = CircleShape,
     ) {
         Text(
             text = label,
             color = fg,
             style = MaterialTheme.typography.labelSmall,
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
         )
     }
 }

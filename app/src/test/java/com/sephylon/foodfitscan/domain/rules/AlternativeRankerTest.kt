@@ -47,6 +47,29 @@ class AlternativeRankerTest {
         assertEquals("en:sodas", tag)
     }
 
+    @Test
+    fun `selectCategoryTags returns most specific tags first capped at two`() {
+        val product = makeProduct(
+            categoriesTags = listOf("en:snacks", "en:sweet-snacks", "en:bars", "en:protein-bars"),
+        )
+        val tags = AlternativeCategorySelector.selectCategoryTags(product)
+        assertEquals(listOf("en:protein-bars", "en:bars"), tags)
+    }
+
+    @Test
+    fun `selectCategoryTags is empty without category data`() {
+        assertTrue(AlternativeCategorySelector.selectCategoryTags(makeProduct(categoriesTags = null)).isEmpty())
+        assertTrue(AlternativeCategorySelector.selectCategoryTags(makeProduct(categoriesTags = emptyList())).isEmpty())
+    }
+
+    @Test
+    fun `specificCategoryTags drops generic and non-english tags`() {
+        val tags = AlternativeCategorySelector.specificCategoryTags(
+            listOf("en:foods-and-drinks", "fr:barres", "en:bars", "en:protein-bars"),
+        )
+        assertEquals(listOf("en:bars", "en:protein-bars"), tags)
+    }
+
     // ── AlternativeRanker ─────────────────────────────────────────────────────
 
     @Test
@@ -141,7 +164,7 @@ class AlternativeRankerTest {
     }
 
     @Test
-    fun `rank returns at most 5 alternatives`() {
+    fun `rank returns at most 4 alternatives`() {
         val candidates = (1..10).map { i ->
             makeProduct(barcode = "B$i", name = "Product $i")
         }
@@ -150,7 +173,91 @@ class AlternativeRankerTest {
             currentBarcode = "X",
             preferences = UserFoodPreferences(),
         )
-        assertTrue(ranked.size <= 5)
+        assertTrue(ranked.size <= 4)
+    }
+
+    @Test
+    fun `rank requires two shared categories when the base product has several specific tags`() {
+        val base = listOf("en:snacks", "en:sweet-snacks", "en:bars", "en:protein-bars")
+        val sameType = makeProduct(
+            barcode = "SAME",
+            name = "Other Protein Bar",
+            categoriesTags = listOf("en:snacks", "en:bars", "en:protein-bars"),
+        )
+        val looselyRelated = makeProduct(
+            barcode = "LOOSE",
+            name = "Chocolate",
+            categoriesTags = listOf("en:snacks"),
+        )
+        val unrelated = makeProduct(
+            barcode = "WATER",
+            name = "Spring Water",
+            categoriesTags = listOf("en:beverages", "en:waters"),
+        )
+        val ranked = AlternativeRanker.rank(
+            candidates = listOf(sameType, looselyRelated, unrelated),
+            currentBarcode = "X",
+            preferences = UserFoodPreferences(),
+            baseCategoryTags = base,
+        )
+        assertEquals(listOf("SAME"), ranked.map { it.barcode })
+    }
+
+    @Test
+    fun `rank accepts single shared category when the base product has only one specific tag`() {
+        val base = listOf("en:foods-and-drinks", "en:biscuits")
+        val match = makeProduct(
+            barcode = "A",
+            name = "Plain Biscuit",
+            categoriesTags = listOf("en:biscuits"),
+        )
+        val nonMatch = makeProduct(
+            barcode = "B",
+            name = "Juice",
+            categoriesTags = listOf("en:juices"),
+        )
+        val ranked = AlternativeRanker.rank(
+            candidates = listOf(match, nonMatch),
+            currentBarcode = "X",
+            preferences = UserFoodPreferences(),
+            baseCategoryTags = base,
+        )
+        assertEquals(listOf("A"), ranked.map { it.barcode })
+    }
+
+    @Test
+    fun `rank orders stronger category overlap before better nutriscore`() {
+        val base = listOf("en:snacks", "en:bars", "en:protein-bars")
+        val closeMatchWorseScore = makeProduct(
+            barcode = "CLOSE",
+            name = "Protein Bar B",
+            nutriScore = "c",
+            categoriesTags = listOf("en:snacks", "en:bars", "en:protein-bars"),
+        )
+        val looserMatchBetterScore = makeProduct(
+            barcode = "LOOSER",
+            name = "Snack Bar A",
+            nutriScore = "a",
+            categoriesTags = listOf("en:snacks", "en:bars"),
+        )
+        val ranked = AlternativeRanker.rank(
+            candidates = listOf(looserMatchBetterScore, closeMatchWorseScore),
+            currentBarcode = "X",
+            preferences = UserFoodPreferences(),
+            baseCategoryTags = base,
+        )
+        assertEquals(listOf("CLOSE", "LOOSER"), ranked.map { it.barcode })
+    }
+
+    @Test
+    fun `rank without base categories applies no overlap filter`() {
+        val candidate = makeProduct(barcode = "A", name = "Anything", categoriesTags = null)
+        val ranked = AlternativeRanker.rank(
+            candidates = listOf(candidate),
+            currentBarcode = "X",
+            preferences = UserFoodPreferences(),
+        )
+        assertEquals(listOf("A"), ranked.map { it.barcode })
     }
 
     @Test

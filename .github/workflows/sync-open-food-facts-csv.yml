@@ -7,6 +7,10 @@ on:
         description: "Number of CSV chunks to process"
         required: false
         default: "1"
+      reset_cursors:
+        description: "Reset country cursors first so rows are re-passed (image backfill). Does not delete documents."
+        required: false
+        default: "false"
   push:
     paths:
       - ".github/workflows/sync-open-food-facts-csv.yml"
@@ -44,4 +48,5 @@ jobs:
           MAX_FIRESTORE_WRITES_PER_RUN: ${{ secrets.MAX_FIRESTORE_WRITES_PER_RUN }}
           OPEN_FOOD_FACTS_USER_AGENT: ${{ secrets.OPEN_FOOD_FACTS_USER_AGENT }}
           CSV_SYNC_CHUNKS_PER_RUN: ${{ github.event.inputs.chunks || '1' }}
+          CSV_SYNC_RESET_CURSORS: ${{ github.event.inputs.reset_cursors || 'false' }}
         run: npm run sync:off-csv

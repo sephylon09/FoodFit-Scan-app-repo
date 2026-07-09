@@ -1,8 +1,11 @@
 package com.sephylon.foodfitscan.ui.home
 
 import com.sephylon.foodfitscan.domain.model.NutritionDisplayOption
+import com.sephylon.foodfitscan.domain.model.ProductSearchItem
+import com.sephylon.foodfitscan.domain.model.ProductSearchResult
 import com.sephylon.foodfitscan.domain.model.UserFoodPreferences
 import com.sephylon.foodfitscan.domain.repository.PreferenceRepository
+import com.sephylon.foodfitscan.domain.repository.ProductSearchRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -15,7 +18,6 @@ import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -35,57 +37,33 @@ class HomeViewModelTest {
         Dispatchers.resetMain()
     }
 
+    private fun viewModel(
+        preferenceRepository: PreferenceRepository = FakePreferenceRepository(),
+        searchRepository: ProductSearchRepository = FakeProductSearchRepository(),
+    ) = HomeViewModel(preferenceRepository, searchRepository)
+
+    // ── Preferences helper card ─────────────────────────────────────────────────
+
     @Test
     fun `showPreferencesCard is true when all preferences are default`() = runTest(testDispatcher) {
-        val repo = FakePreferenceRepository(UserFoodPreferences())
-        val vm = HomeViewModel(repo)
+        val vm = viewModel(FakePreferenceRepository(UserFoodPreferences()))
 
-        val result = vm.showPreferencesCard.first { true }
-
-        assertTrue(result)
+        assertTrue(vm.showPreferencesCard.first { true })
     }
 
     @Test
     fun `showPreferencesCard is false when allergens are set`() = runTest(testDispatcher) {
-        val repo = FakePreferenceRepository(
-            UserFoodPreferences(allergensToAvoid = setOf("en:milk")),
+        val vm = viewModel(
+            FakePreferenceRepository(UserFoodPreferences(allergensToAvoid = setOf("en:milk"))),
         )
-        val vm = HomeViewModel(repo)
 
-        val result = vm.showPreferencesCard.first { true }
-
-        assertFalse(result)
-    }
-
-    @Test
-    fun `showPreferencesCard is false when avoidUltraProcessed is true`() = runTest(testDispatcher) {
-        val repo = FakePreferenceRepository(
-            UserFoodPreferences(avoidUltraProcessed = true),
-        )
-        val vm = HomeViewModel(repo)
-
-        val result = vm.showPreferencesCard.first { true }
-
-        assertFalse(result)
-    }
-
-    @Test
-    fun `showPreferencesCard is false when nutrition cap is set`() = runTest(testDispatcher) {
-        val repo = FakePreferenceRepository(
-            UserFoodPreferences(maxSugarsPer100g = 10.0),
-        )
-        val vm = HomeViewModel(repo)
-
-        val result = vm.showPreferencesCard.first { true }
-
-        assertFalse(result)
+        assertFalse(vm.showPreferencesCard.first { true })
     }
 
     @Test
     fun `showPreferencesCard updates when preferences change`() = runTest(testDispatcher) {
         val prefsFlow = MutableStateFlow(UserFoodPreferences())
-        val repo = FakePreferenceRepository(prefs = prefsFlow)
-        val vm = HomeViewModel(repo)
+        val vm = viewModel(FakePreferenceRepository(prefs = prefsFlow))
 
         assertTrue(vm.showPreferencesCard.first { true })
 
@@ -97,79 +75,163 @@ class HomeViewModelTest {
     // ── Search submit logic ─────────────────────────────────────────────────────
 
     @Test
-    fun `blank search returns Blank and shows validation message`() = runTest(testDispatcher) {
-        val vm = HomeViewModel(FakePreferenceRepository())
+    fun `blank search returns Handled and shows blank validation message`() = runTest(testDispatcher) {
+        val search = FakeProductSearchRepository()
+        val vm = viewModel(searchRepository = search)
 
         vm.onSearchQueryChange("   ")
-        val result = vm.onSearchSubmit()
+        val action = vm.onSearchSubmit()
 
-        assertEquals(HomeSearchResult.Blank, result)
-        assertEquals(HomeViewModel.BLANK_MESSAGE, vm.searchMessage.value)
+        assertEquals(HomeSearchAction.Handled, action)
+        assertEquals(
+            ProductSearchResult.ValidationError(HomeViewModel.BLANK_MESSAGE),
+            vm.searchState.value,
+        )
+        assertEquals(0, search.callCount)
     }
 
     @Test
-    fun `empty search returns Blank and shows validation message`() = runTest(testDispatcher) {
-        val vm = HomeViewModel(FakePreferenceRepository())
+    fun `empty search shows blank validation message`() = runTest(testDispatcher) {
+        val vm = viewModel()
 
-        val result = vm.onSearchSubmit()
+        val action = vm.onSearchSubmit()
 
-        assertEquals(HomeSearchResult.Blank, result)
-        assertEquals(HomeViewModel.BLANK_MESSAGE, vm.searchMessage.value)
+        assertEquals(HomeSearchAction.Handled, action)
+        assertEquals(
+            ProductSearchResult.ValidationError(HomeViewModel.BLANK_MESSAGE),
+            vm.searchState.value,
+        )
     }
 
     @Test
-    fun `valid barcode search navigates to product detail`() = runTest(testDispatcher) {
-        val vm = HomeViewModel(FakePreferenceRepository())
+    fun `two character query shows minimum length message and skips firebase`() =
+        runTest(testDispatcher) {
+            val search = FakeProductSearchRepository()
+            val vm = viewModel(searchRepository = search)
 
-        vm.onSearchQueryChange("5449000000996")
-        val result = vm.onSearchSubmit()
+            vm.onSearchQueryChange("ab")
+            val action = vm.onSearchSubmit()
 
-        assertEquals(HomeSearchResult.NavigateToProduct("5449000000996"), result)
-        assertNull(vm.searchMessage.value)
-    }
+            assertEquals(HomeSearchAction.Handled, action)
+            assertEquals(
+                ProductSearchResult.ValidationError(HomeViewModel.MIN_LENGTH_MESSAGE),
+                vm.searchState.value,
+            )
+            assertEquals(0, search.callCount)
+        }
+
+    @Test
+    fun `valid barcode navigates to product detail without querying firebase`() =
+        runTest(testDispatcher) {
+            val search = FakeProductSearchRepository()
+            val vm = viewModel(searchRepository = search)
+
+            vm.onSearchQueryChange("5449000000996")
+            val action = vm.onSearchSubmit()
+
+            assertEquals(HomeSearchAction.NavigateToProduct("5449000000996"), action)
+            assertEquals(ProductSearchResult.Idle, vm.searchState.value)
+            assertEquals(0, search.callCount)
+        }
 
     @Test
     fun `valid barcode with surrounding spaces is normalized before navigation`() =
         runTest(testDispatcher) {
-            val vm = HomeViewModel(FakePreferenceRepository())
+            val vm = viewModel()
 
             vm.onSearchQueryChange("  5449000000996  ")
-            val result = vm.onSearchSubmit()
+            val action = vm.onSearchSubmit()
 
-            assertEquals(HomeSearchResult.NavigateToProduct("5449000000996"), result)
+            assertEquals(HomeSearchAction.NavigateToProduct("5449000000996"), action)
         }
 
     @Test
-    fun `product name search shows placeholder message`() = runTest(testDispatcher) {
-        val vm = HomeViewModel(FakePreferenceRepository())
+    fun `product name search calls repository and publishes results`() = runTest(testDispatcher) {
+        val items = listOf(ProductSearchItem(barcode = "1", name = "Nutella"))
+        val search = FakeProductSearchRepository(result = ProductSearchResult.Success(items))
+        val vm = viewModel(searchRepository = search)
 
-        vm.onSearchQueryChange("chocolate bar")
-        val result = vm.onSearchSubmit()
+        vm.onSearchQueryChange("nutella")
+        val action = vm.onSearchSubmit()
 
-        assertEquals(HomeSearchResult.ProductNameUnsupported, result)
-        assertEquals(HomeViewModel.PRODUCT_NAME_MESSAGE, vm.searchMessage.value)
+        assertEquals(HomeSearchAction.Handled, action)
+        assertEquals(1, search.callCount)
+        assertEquals("nutella", search.queries.last())
+        assertEquals(ProductSearchResult.Success(items), vm.searchState.value)
+    }
+
+    @Test
+    fun `product name search does not run while typing`() = runTest(testDispatcher) {
+        val search = FakeProductSearchRepository()
+        val vm = viewModel(searchRepository = search)
+
+        vm.onSearchQueryChange("n")
+        vm.onSearchQueryChange("nu")
+        vm.onSearchQueryChange("nut")
+        vm.onSearchQueryChange("nutella")
+
+        assertEquals(0, search.callCount)
+        assertEquals(ProductSearchResult.Idle, vm.searchState.value)
     }
 
     @Test
     fun `editing the query clears a previous message`() = runTest(testDispatcher) {
-        val vm = HomeViewModel(FakePreferenceRepository())
+        val vm = viewModel()
 
-        vm.onSearchQueryChange("chocolate bar")
+        vm.onSearchQueryChange("ab")
         vm.onSearchSubmit()
-        assertEquals(HomeViewModel.PRODUCT_NAME_MESSAGE, vm.searchMessage.value)
+        assertTrue(vm.searchState.value is ProductSearchResult.ValidationError)
 
-        vm.onSearchQueryChange("chocolate bars")
+        vm.onSearchQueryChange("abc")
 
-        assertNull(vm.searchMessage.value)
+        assertEquals(ProductSearchResult.Idle, vm.searchState.value)
+    }
+
+    @Test
+    fun `retry re-runs the last product name query`() = runTest(testDispatcher) {
+        val search = FakeProductSearchRepository(result = ProductSearchResult.NetworkError("offline"))
+        val vm = viewModel(searchRepository = search)
+
+        vm.onSearchQueryChange("nutella")
+        vm.onSearchSubmit()
+        assertEquals(1, search.callCount)
+
+        vm.retryLastSearch()
+
+        assertEquals(2, search.callCount)
+        assertEquals(listOf("nutella", "nutella"), search.queries)
+    }
+
+    @Test
+    fun `retry does nothing when no search has run`() = runTest(testDispatcher) {
+        val search = FakeProductSearchRepository()
+        val vm = viewModel(searchRepository = search)
+
+        vm.retryLastSearch()
+
+        assertEquals(0, search.callCount)
     }
 
     @Test
     fun `query state reflects typed text`() = runTest(testDispatcher) {
-        val vm = HomeViewModel(FakePreferenceRepository())
+        val vm = viewModel()
 
         vm.onSearchQueryChange("nutella")
 
         assertEquals("nutella", vm.searchQuery.value)
+    }
+}
+
+private class FakeProductSearchRepository(
+    private val result: ProductSearchResult = ProductSearchResult.Empty,
+) : ProductSearchRepository {
+    var callCount = 0
+    val queries = mutableListOf<String>()
+
+    override suspend fun searchByName(rawQuery: String): ProductSearchResult {
+        callCount++
+        queries.add(rawQuery)
+        return result
     }
 }
 

@@ -165,4 +165,74 @@ class ProductDisplayHelperTest {
 
         assertEquals(NutritionDisplayOption.DEFAULT_KEYS, rows.map { it.key }.toSet())
     }
+
+    // availableNutritionRows
+
+    @Test
+    fun `availableNutritionRows omits selected fields with no data`() {
+        val nutrition = NutritionFacts(proteinPer100g = 8.0) // carbohydrates missing
+
+        val rows = ProductDisplayHelper.availableNutritionRows(nutrition, setOf("protein", "carbohydrates"))
+
+        assertEquals(listOf("protein"), rows.map { it.key })
+        assertEquals("8.0 g", rows.single().value)
+    }
+
+    @Test
+    fun `availableNutritionRows keeps canonical order for present fields`() {
+        val nutrition = NutritionFacts(proteinPer100g = 8.0, carbohydratesPer100g = 30.0)
+
+        val rows = ProductDisplayHelper.availableNutritionRows(nutrition, setOf("protein", "carbohydrates"))
+
+        assertEquals(listOf("carbohydrates", "protein"), rows.map { it.key })
+    }
+
+    @Test
+    fun `availableNutritionRows is empty when nutrition is null`() {
+        val rows = ProductDisplayHelper.availableNutritionRows(null, setOf("protein", "salt"))
+
+        assertTrue(rows.isEmpty())
+    }
+
+    @Test
+    fun `availableNutritionRows is empty when no selected field has data`() {
+        val rows = ProductDisplayHelper.availableNutritionRows(NutritionFacts(), setOf("protein", "salt"))
+
+        assertTrue(rows.isEmpty())
+    }
+
+    @Test
+    fun `availableNutritionRows uses kcal unit for energy`() {
+        val nutrition = NutritionFacts(energyKcalPer100g = 250.0)
+
+        val rows = ProductDisplayHelper.availableNutritionRows(nutrition, setOf("energy_kcal"))
+
+        assertEquals("250.0 kcal", rows.single().value)
+    }
+
+    @Test
+    fun `availableNutritionRows carries raw value unit and guide limit for the level bar`() {
+        val nutrition = NutritionFacts(energyKcalPer100g = 250.0, sugarsPer100g = 30.0)
+
+        val rows = ProductDisplayHelper.availableNutritionRows(nutrition, setOf("energy_kcal", "sugars"))
+
+        val energy = rows.first { it.key == "energy_kcal" }
+        assertEquals(250.0, energy.rawValue!!, 0.0)
+        assertEquals("kcal", energy.unit)
+        assertEquals(400.0, energy.guideLimit!!, 0.0)
+
+        val sugars = rows.first { it.key == "sugars" }
+        assertEquals(30.0, sugars.rawValue!!, 0.0)
+        assertEquals(22.5, sugars.guideLimit!!, 0.0)
+    }
+
+    @Test
+    fun `availableNutritionRows has no guide limit for fields without one`() {
+        val nutrition = NutritionFacts(proteinPer100g = 8.0)
+
+        val row = ProductDisplayHelper.availableNutritionRows(nutrition, setOf("protein")).single()
+
+        assertEquals(null, row.guideLimit)
+        assertEquals(8.0, row.rawValue!!, 0.0)
+    }
 }

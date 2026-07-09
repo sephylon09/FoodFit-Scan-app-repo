@@ -29,6 +29,8 @@ sealed class ProductDetailUiState {
         val isFromStaleCache: Boolean = false,
         val suitabilityResult: SuitabilityResult,
         val selectedNutritionKeys: Set<String> = NutritionDisplayOption.DEFAULT_KEYS,
+        /** User's avoided allergen keys, for ingredient warnings/highlighting in the UI. */
+        val avoidedAllergenKeys: Set<String> = emptySet(),
     ) : ProductDetailUiState()
     data class NotFound(val barcode: String) : ProductDetailUiState()
     data class NetworkError(val message: String) : ProductDetailUiState()
@@ -88,6 +90,7 @@ class ProductDetailViewModel(
                             isFromStaleCache = result.isFromStaleCache,
                             suitabilityResult = scorer.score(result.product, prefs),
                             selectedNutritionKeys = nutritionKeys,
+                            avoidedAllergenKeys = prefs.allergensToAvoid,
                         )
                     }.collect { _uiState.value = it }
                 }

@@ -55,7 +55,7 @@ fun AppNavigation(appViewModel: AppViewModel = viewModel(factory = AppViewModel.
         composable(Screen.Home.route) {
             HomeScreen(
                 onScanClick = { navController.navigate(Screen.Scanner.route) },
-                onBarcodeSearch = { barcode ->
+                onOpenProduct = { barcode ->
                     navController.navigate(Screen.ProductDetail.createRoute(barcode))
                 },
                 onSettingsClick = { navController.navigate(Screen.Settings.route) },

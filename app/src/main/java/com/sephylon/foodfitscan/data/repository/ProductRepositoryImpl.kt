@@ -28,6 +28,8 @@ internal class ProductRepositoryImpl(
 
     companion object {
         private const val CACHE_FRESH_MILLIS = 7L * 24 * 60 * 60 * 1000
+        private const val ALTERNATIVES_PAGE_SIZE = 24
+        private const val MIN_DESIRED_ALTERNATIVES = 2
     }
 
     override suspend fun getProduct(barcode: String): ProductLookupResult {
@@ -79,16 +81,22 @@ internal class ProductRepositoryImpl(
         product: ProductDetails,
         preferences: UserFoodPreferences,
     ): AlternativesResult {
-        val categoryTag = AlternativeCategorySelector.selectCategoryTag(product)
-            ?: return AlternativesResult.NoCategory
+        // Most-specific category first; a broader related tag is only queried as a
+        // fallback when the specific one yields too few similar candidates.
+        val categoryTags = AlternativeCategorySelector.selectCategoryTags(product)
+        if (categoryTags.isEmpty()) return AlternativesResult.NoCategory
         return try {
-            val candidates = client.searchByCategory(categoryTag, pageSize = 20)
-            val ranked = AlternativeRanker.rank(
-                candidates = candidates,
-                currentBarcode = product.barcode,
-                preferences = preferences,
-            )
-            // TODO Phase 2C: consider caching alternatives per category tag
+            val candidates = client
+                .searchByCategory(categoryTags.first(), pageSize = ALTERNATIVES_PAGE_SIZE)
+                .toMutableList()
+            var ranked = rankAlternatives(candidates, product, preferences)
+
+            if (ranked.size < MIN_DESIRED_ALTERNATIVES && categoryTags.size > 1) {
+                val fallback = client.searchByCategory(categoryTags[1], pageSize = ALTERNATIVES_PAGE_SIZE)
+                candidates += fallback
+                ranked = rankAlternatives(candidates.distinctBy { it.barcode }, product, preferences)
+            }
+
             if (ranked.isEmpty()) AlternativesResult.Empty
             else AlternativesResult.Success(ranked)
         } catch (e: IOException) {
@@ -97,6 +105,17 @@ internal class ProductRepositoryImpl(
             AlternativesResult.UnknownError(e.message ?: "Unknown error")
         }
     }
+
+    private fun rankAlternatives(
+        candidates: List<ProductDetails>,
+        product: ProductDetails,
+        preferences: UserFoodPreferences,
+    ) = AlternativeRanker.rank(
+        candidates = candidates,
+        currentBarcode = product.barcode,
+        preferences = preferences,
+        baseCategoryTags = product.categoriesTags,
+    )
 
     override fun observeScanHistory(limit: Int): Flow<List<ScanHistoryItem>> =
         scanHistoryDao.observeRecentScanHistory(limit).map { entities ->

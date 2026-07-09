@@ -6,14 +6,17 @@ import com.sephylon.foodfitscan.core.network.OpenFoodFactsClient
 import com.sephylon.foodfitscan.data.local.CachedProductDao
 import com.sephylon.foodfitscan.data.local.FoodFitDatabase
 import com.sephylon.foodfitscan.data.local.ScanHistoryDao
+import com.sephylon.foodfitscan.data.firebase.FirestoreProductSearchClient
 import com.sephylon.foodfitscan.data.mapper.ProductDetailsCacheMapper
 import com.sephylon.foodfitscan.data.mapper.ScanHistoryMapper
 import com.sephylon.foodfitscan.data.preferences.foodPreferenceDataStore
 import com.sephylon.foodfitscan.data.remote.OpenFoodFactsClientImpl
 import com.sephylon.foodfitscan.data.repository.PreferenceRepositoryImpl
 import com.sephylon.foodfitscan.data.repository.ProductRepositoryImpl
+import com.sephylon.foodfitscan.data.repository.ProductSearchRepositoryImpl
 import com.sephylon.foodfitscan.domain.repository.PreferenceRepository
 import com.sephylon.foodfitscan.domain.repository.ProductRepository
+import com.sephylon.foodfitscan.domain.repository.ProductSearchRepository
 
 // Lightweight manual DI. Replace with Hilt/Dagger in a later phase.
 internal object AppDependencies {
@@ -53,5 +56,9 @@ internal object AppDependencies {
 
     val preferenceRepository: PreferenceRepository by lazy {
         PreferenceRepositoryImpl(appContext.foodPreferenceDataStore)
+    }
+
+    val productSearchRepository: ProductSearchRepository by lazy {
+        ProductSearchRepositoryImpl(client = FirestoreProductSearchClient())
     }
 }

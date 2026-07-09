@@ -6,34 +6,45 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.sephylon.foodfitscan.AppDependencies
+import com.sephylon.foodfitscan.domain.model.ProductSearchResult
 import com.sephylon.foodfitscan.domain.model.UserFoodPreferences
 import com.sephylon.foodfitscan.domain.repository.PreferenceRepository
+import com.sephylon.foodfitscan.domain.repository.ProductSearchRepository
 import com.sephylon.foodfitscan.domain.util.BarcodeValidator
+import com.sephylon.foodfitscan.domain.util.SearchTextNormalizer
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 
 /**
- * Result of the user pressing search on the Home screen. The UI is responsible for
- * performing navigation when the result is [NavigateToProduct]; the other outcomes
- * only surface an inline message (already applied to [HomeViewModel.searchMessage]).
+ * Synchronous outcome of the user pressing search. [NavigateToProduct] tells the UI to
+ * open ProductDetail for a scanned/typed barcode; [Handled] means the outcome is reflected
+ * in [HomeViewModel.searchState] (validation message, loading, results, or error).
  */
-sealed interface HomeSearchResult {
-    data class NavigateToProduct(val barcode: String) : HomeSearchResult
-    data object Blank : HomeSearchResult
-    data object ProductNameUnsupported : HomeSearchResult
+sealed interface HomeSearchAction {
+    data class NavigateToProduct(val barcode: String) : HomeSearchAction
+    data object Handled : HomeSearchAction
 }
 
-class HomeViewModel(private val preferenceRepository: PreferenceRepository) : ViewModel() {
+class HomeViewModel(
+    private val preferenceRepository: PreferenceRepository,
+    private val productSearchRepository: ProductSearchRepository,
+) : ViewModel() {
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
 
-    private val _searchMessage = MutableStateFlow<String?>(null)
-    val searchMessage: StateFlow<String?> = _searchMessage.asStateFlow()
+    private val _searchState = MutableStateFlow<ProductSearchResult>(ProductSearchResult.Idle)
+    val searchState: StateFlow<ProductSearchResult> = _searchState.asStateFlow()
+
+    /** Last product-name query that reached Firebase, so [retryLastSearch] can re-run it. */
+    private var lastSearchQuery: String? = null
+    private var searchJob: Job? = null
 
     val showPreferencesCard: StateFlow<Boolean> =
         preferenceRepository.getUserPreferences()
@@ -47,39 +58,57 @@ class HomeViewModel(private val preferenceRepository: PreferenceRepository) : Vi
     /** Updates the query text. Never triggers a search — search only runs on submit. */
     fun onSearchQueryChange(value: String) {
         _searchQuery.value = value
-        // Clear any stale message as soon as the user edits the query again.
-        if (_searchMessage.value != null) {
-            _searchMessage.value = null
+        // Editing the query clears any prior message/results and returns to the intro.
+        if (_searchState.value != ProductSearchResult.Idle) {
+            _searchState.value = ProductSearchResult.Idle
         }
     }
 
     /**
-     * Classifies the current query when the user presses the search icon or the
-     * keyboard search action. This is the ONLY place a search is triggered — there is
-     * no search-as-you-type.
+     * Classifies the current query when the user presses the search icon or the keyboard
+     * search action. This is the ONLY place a search is triggered — there is no
+     * search-as-you-type.
      *
-     * TODO(Firebase phase): add a lightweight Firebase-backed product index search here.
-     *   - Only after the user presses search (keep: no search-as-you-type).
-     *   - Query the index by product name (the current "not a barcode" branch).
-     *   - Show tappable results; tapping a result opens ProductDetailScreen by its barcode.
-     *   Do NOT add the Firebase dependency until that phase.
+     * - blank -> validation message
+     * - valid barcode -> navigate straight to ProductDetail (no Firebase call)
+     * - too short (no searchable word >= [SearchTextNormalizer.MIN_PREFIX_LENGTH]) -> validation
+     * - otherwise -> product-name search against Firestore
      */
-    fun onSearchSubmit(): HomeSearchResult {
+    fun onSearchSubmit(): HomeSearchAction {
         val query = _searchQuery.value
         return when {
             query.isBlank() -> {
-                _searchMessage.value = BLANK_MESSAGE
-                HomeSearchResult.Blank
+                _searchState.value = ProductSearchResult.ValidationError(BLANK_MESSAGE)
+                HomeSearchAction.Handled
             }
             BarcodeValidator.isValidBarcode(query) -> {
-                _searchMessage.value = null
-                HomeSearchResult.NavigateToProduct(BarcodeValidator.normalizeBarcode(query))
+                _searchState.value = ProductSearchResult.Idle
+                HomeSearchAction.NavigateToProduct(BarcodeValidator.normalizeBarcode(query))
+            }
+            SearchTextNormalizer.queryPrefix(query) == null -> {
+                _searchState.value = ProductSearchResult.ValidationError(MIN_LENGTH_MESSAGE)
+                HomeSearchAction.Handled
             }
             else -> {
-                // TODO(Firebase phase): replace this placeholder with real product-name search.
-                _searchMessage.value = PRODUCT_NAME_MESSAGE
-                HomeSearchResult.ProductNameUnsupported
+                runProductNameSearch(query)
+                HomeSearchAction.Handled
             }
+        }
+    }
+
+    /** Re-runs the most recent product-name search (used by the error-state retry button). */
+    fun retryLastSearch() {
+        val query = lastSearchQuery ?: return
+        runProductNameSearch(query)
+    }
+
+    private fun runProductNameSearch(query: String) {
+        lastSearchQuery = query
+        // Cancel any in-flight search so overlapping submits don't race.
+        searchJob?.cancel()
+        _searchState.value = ProductSearchResult.Loading
+        searchJob = viewModelScope.launch {
+            _searchState.value = productSearchRepository.searchByName(query)
         }
     }
 
@@ -93,10 +122,15 @@ class HomeViewModel(private val preferenceRepository: PreferenceRepository) : Vi
 
     companion object {
         const val BLANK_MESSAGE = "Enter a product name or barcode."
-        const val PRODUCT_NAME_MESSAGE = "Product name search will be added in a later phase."
+        const val MIN_LENGTH_MESSAGE = "Enter at least 3 characters to search."
 
         val Factory: ViewModelProvider.Factory = viewModelFactory {
-            initializer { HomeViewModel(AppDependencies.preferenceRepository) }
+            initializer {
+                HomeViewModel(
+                    preferenceRepository = AppDependencies.preferenceRepository,
+                    productSearchRepository = AppDependencies.productSearchRepository,
+                )
+            }
         }
     }
 }

@@ -1,5 +1,6 @@
 package com.sephylon.foodfitscan.ui.settings
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -8,24 +9,21 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -34,12 +32,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.sephylon.foodfitscan.domain.model.AdditiveOption
-import com.sephylon.foodfitscan.domain.model.AllergenOption
+import com.sephylon.foodfitscan.ui.components.ChipOption
+import com.sephylon.foodfitscan.ui.components.SelectionChipGroup
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -53,10 +50,12 @@ fun SettingsScreen(
     if (state.showResetDialog) {
         AlertDialog(
             onDismissRequest = viewModel::dismissResetDialog,
-            title = { Text("Reset preferences?") },
-            text = { Text("All allergen, additive, and nutrition preferences will be cleared.") },
+            title = { Text("Reset all preferences?") },
+            text = { Text("This clears your allergens, additives, and nutrition settings.") },
             confirmButton = {
-                TextButton(onClick = viewModel::resetPreferences) { Text("Reset") }
+                TextButton(onClick = viewModel::resetPreferences) {
+                    Text("Reset", color = MaterialTheme.colorScheme.error)
+                }
             },
             dismissButton = {
                 TextButton(onClick = viewModel::dismissResetDialog) { Text("Cancel") }
@@ -80,143 +79,115 @@ fun SettingsScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(horizontal = 16.dp)
+                .padding(horizontal = 20.dp)
                 .verticalScroll(rememberScrollState()),
         ) {
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(4.dp))
 
-            Card(
+            InfoBanner("Preferences personalize your results. Always check the packaging.")
+
+            SectionSpacer()
+
+            SectionHeader("Allergens to avoid")
+            SelectionChipGroup(
+                options = state.allergenOptions.map { ChipOption(it.key, it.displayName) },
+                selectedKeys = state.selectedAllergens,
+                onToggle = viewModel::toggleAllergen,
+            )
+
+            SectionSpacer()
+
+            SectionHeader("Additives to avoid")
+            SelectionChipGroup(
+                options = state.additiveOptions.map { ChipOption(it.key, it.displayName) },
+                selectedKeys = state.selectedAdditives,
+                onToggle = viewModel::toggleAdditive,
+            )
+
+            SectionSpacer()
+
+            SectionHeader("Ultra-processed foods")
+            Surface(
                 modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                ),
-                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                shape = MaterialTheme.shapes.medium,
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = "Warn me about ultra-processed foods",
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                        Text(
+                            text = "Flags products in NOVA group 4",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = state.avoidUltraProcessed,
+                        onCheckedChange = { viewModel.toggleAvoidUltraProcessed() },
+                    )
+                }
+            }
+
+            SectionSpacer()
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "Preferences are used for informational scoring only. Food data from Open Food Facts may be incomplete — always check the product packaging.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSecondaryContainer,
-                    modifier = Modifier.padding(12.dp),
+                    text = "Nutrition on product pages",
+                    style = MaterialTheme.typography.titleSmall,
                 )
-            }
-
-            Spacer(Modifier.height(8.dp))
-
-            SectionLabel("Allergens to Avoid")
-            PreferenceCard {
-                state.allergenOptions.forEachIndexed { index, option ->
-                    CheckboxRow(
-                        label = option.displayName,
-                        checked = option.key in state.selectedAllergens,
-                        onCheckedChange = { viewModel.toggleAllergen(option.key) },
-                    )
-                    if (index < state.allergenOptions.lastIndex) HorizontalDivider()
+                TextButton(onClick = viewModel::resetNutritionFields) {
+                    Text("Reset")
                 }
             }
-            HelperText("Allergen data may be incomplete. Always check packaging.")
-
-            Spacer(Modifier.height(16.dp))
-
-            SectionLabel("Additives to Avoid")
-            PreferenceCard {
-                state.additiveOptions.forEachIndexed { index, option ->
-                    CheckboxRow(
-                        label = option.displayName,
-                        checked = option.key in state.selectedAdditives,
-                        onCheckedChange = { viewModel.toggleAdditive(option.key) },
-                    )
-                    if (index < state.additiveOptions.lastIndex) HorizontalDivider()
-                }
-            }
-
-            Spacer(Modifier.height(16.dp))
-
-            SectionLabel("Ultra-Processed Foods")
-            PreferenceCard {
-                SwitchRow(
-                    label = "Avoid NOVA 4 ultra-processed foods",
-                    checked = state.avoidUltraProcessed,
-                    onCheckedChange = { viewModel.toggleAvoidUltraProcessed() },
-                )
-            }
-            HelperText("Warns when a scanned product is NOVA group 4 (ultra-processed).")
-
-            Spacer(Modifier.height(16.dp))
-
-            SectionLabel("Nutrition Caps (per 100g)")
-            PreferenceCard {
-                NutritionCapField(
-                    label = "Max sugar (g)",
-                    value = state.maxSugarInput,
-                    isError = state.sugarInputError,
-                    onValueChange = viewModel::onSugarInputChanged,
-                )
-                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-                NutritionCapField(
-                    label = "Max salt (g)",
-                    value = state.maxSaltInput,
-                    isError = state.saltInputError,
-                    onValueChange = viewModel::onSaltInputChanged,
-                )
-                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-                NutritionCapField(
-                    label = "Max saturated fat (g)",
-                    value = state.maxSaturatedFatInput,
-                    isError = state.saturatedFatInputError,
-                    onValueChange = viewModel::onSaturatedFatInputChanged,
-                )
-            }
-            HelperText("Leave empty for no limit. Values are per 100 g. Based on Open Food Facts data, which may be incomplete.")
-
-            Spacer(Modifier.height(16.dp))
-
-            SectionLabel("Nutrition fields to show")
-            PreferenceCard {
-                state.nutritionFieldOptions.forEachIndexed { index, option ->
-                    CheckboxRow(
-                        label = option.displayName,
-                        checked = option.key in state.selectedNutritionFields,
-                        onCheckedChange = { viewModel.toggleNutritionField(option.key) },
-                    )
-                    if (index < state.nutritionFieldOptions.lastIndex) HorizontalDivider()
-                }
-            }
-            HelperText("Choose which nutrition values appear on product result screens.")
+            SelectionChipGroup(
+                options = state.nutritionFieldOptions.map { ChipOption(it.key, it.displayName) },
+                selectedKeys = state.selectedNutritionFields,
+                onToggle = viewModel::toggleNutritionField,
+            )
             if (state.showLastFieldWarning) {
+                Spacer(Modifier.height(6.dp))
                 Text(
-                    text = "Select at least one nutrition field.",
+                    text = "Keep at least one field selected.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
                 )
             }
-            TextButton(
-                onClick = viewModel::resetNutritionFields,
-                modifier = Modifier.padding(horizontal = 4.dp),
-            ) {
-                Text("Reset to default")
-            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "Fields without data are hidden on product pages.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
 
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.height(36.dp))
 
-            Button(
-                onClick = viewModel::showResetDialog,
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.errorContainer,
-                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                ),
-            ) {
-                Text("Reset all preferences")
-            }
-
-            Spacer(Modifier.height(12.dp))
-
-            TextButton(
+            OutlinedButton(
                 onClick = onReviewOnboarding,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text("Review onboarding")
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            TextButton(
+                onClick = viewModel::showResetDialog,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Reset all preferences", color = MaterialTheme.colorScheme.error)
             }
 
             Spacer(Modifier.height(24.dp))
@@ -225,99 +196,42 @@ fun SettingsScreen(
 }
 
 @Composable
-private fun SectionLabel(text: String) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.labelLarge,
-        color = MaterialTheme.colorScheme.primary,
-        modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
-    )
-}
-
-@Composable
-private fun HelperText(text: String) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
-    )
-}
-
-@Composable
-private fun PreferenceCard(content: @Composable () -> Unit) {
-    Card(
+private fun InfoBanner(text: String) {
+    Surface(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
     ) {
-        Column { content() }
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.Info,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Spacer(Modifier.width(10.dp))
+            Text(
+                text = text,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 
 @Composable
-private fun CheckboxRow(
-    label: String,
-    checked: Boolean,
-    onCheckedChange: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyLarge,
-            modifier = Modifier.weight(1f),
-        )
-        Checkbox(checked = checked, onCheckedChange = { onCheckedChange() })
-    }
+private fun SectionHeader(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.titleSmall,
+        modifier = Modifier.padding(bottom = 10.dp),
+    )
 }
 
 @Composable
-private fun SwitchRow(
-    label: String,
-    checked: Boolean,
-    onCheckedChange: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyLarge,
-            modifier = Modifier.weight(1f),
-        )
-        Switch(checked = checked, onCheckedChange = { onCheckedChange() })
-    }
-}
-
-@Composable
-private fun NutritionCapField(
-    label: String,
-    value: String,
-    isError: Boolean,
-    onValueChange: (String) -> Unit,
-) {
-    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-        OutlinedTextField(
-            value = value,
-            onValueChange = onValueChange,
-            label = { Text(label) },
-            isError = isError,
-            supportingText = if (isError) {
-                { Text("Enter a valid positive number") }
-            } else null,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-    }
+private fun SectionSpacer() {
+    Spacer(Modifier.height(28.dp))
 }

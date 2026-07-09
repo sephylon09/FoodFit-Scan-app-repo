@@ -7,7 +7,7 @@
     "doc": "docs"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --test \"scripts/**/*.test.js\"",
     "sync:off": "node scripts/sync-off-to-firestore.js",
     "sync:off-csv": "node scripts/sync-off-csv-to-firestore.js",
     "stats:firestore": "node scripts/firestore-product-stats.js"

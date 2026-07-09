@@ -48,6 +48,13 @@ class OnboardingViewModelTest {
     }
 
     @Test
+    fun `nextPage does not exceed the last page`() = runTest(testDispatcher) {
+        val vm = OnboardingViewModel(FakePreferenceRepository())
+        repeat(OnboardingViewModel.PAGE_COUNT + 3) { vm.nextPage() }
+        assertEquals(OnboardingViewModel.PAGE_COUNT - 1, vm.uiState.value.currentPage)
+    }
+
+    @Test
     fun `previousPage decrements currentPage`() = runTest(testDispatcher) {
         val vm = OnboardingViewModel(FakePreferenceRepository())
         vm.nextPage()
@@ -151,15 +158,91 @@ class OnboardingViewModelTest {
         assertTrue("en:eggs" in saved.allergensToAvoid)
         assertEquals(5.0, saved.maxSugarsPer100g)
     }
+
+    // ── Nutrition display fields ────────────────────────────────────────────
+
+    @Test
+    fun `nutrition fields default to the practical defaults`() = runTest(testDispatcher) {
+        val vm = OnboardingViewModel(FakePreferenceRepository())
+        assertEquals(NutritionDisplayOption.DEFAULT_KEYS, vm.uiState.value.selectedNutritionFields)
+    }
+
+    @Test
+    fun `toggleNutritionField adds an unselected field`() = runTest(testDispatcher) {
+        val vm = OnboardingViewModel(FakePreferenceRepository())
+        vm.toggleNutritionField("fiber")
+        assertTrue("fiber" in vm.uiState.value.selectedNutritionFields)
+    }
+
+    @Test
+    fun `toggleNutritionField removes a selected field`() = runTest(testDispatcher) {
+        val vm = OnboardingViewModel(FakePreferenceRepository())
+        vm.toggleNutritionField("protein")
+        assertFalse("protein" in vm.uiState.value.selectedNutritionFields)
+    }
+
+    @Test
+    fun `toggleNutritionField cannot deselect the last remaining field`() = runTest(testDispatcher) {
+        val repo = FakePreferenceRepository(initialNutritionFields = setOf("protein"))
+        val vm = OnboardingViewModel(repo)
+
+        vm.toggleNutritionField("protein")
+
+        assertTrue("protein" in vm.uiState.value.selectedNutritionFields)
+        assertEquals(1, vm.uiState.value.selectedNutritionFields.size)
+    }
+
+    @Test
+    fun `completeOnboarding saves selected nutrition fields`() = runTest(testDispatcher) {
+        val repo = FakePreferenceRepository()
+        val vm = OnboardingViewModel(repo)
+
+        vm.toggleNutritionField("fiber")
+        vm.completeOnboarding()
+        advanceUntilIdle()
+
+        assertTrue("fiber" in repo.savedNutritionFields!!)
+    }
+
+    // ── Review flow: pre-filling stored preferences ─────────────────────────
+
+    @Test
+    fun `initial state loads stored preferences for review`() = runTest(testDispatcher) {
+        val repo = FakePreferenceRepository(
+            initial = UserFoodPreferences(
+                allergensToAvoid = setOf("en:milk"),
+                avoidUltraProcessed = true,
+            ),
+            initialNutritionFields = setOf("protein", "fiber"),
+        )
+
+        val vm = OnboardingViewModel(repo)
+        advanceUntilIdle()
+
+        assertTrue("en:milk" in vm.uiState.value.selectedAllergens)
+        assertTrue(vm.uiState.value.avoidUltraProcessed)
+        assertEquals(setOf("protein", "fiber"), vm.uiState.value.selectedNutritionFields)
+    }
+
+    @Test
+    fun `setAvoidUltraProcessed sets the value directly`() = runTest(testDispatcher) {
+        val vm = OnboardingViewModel(FakePreferenceRepository())
+        vm.setAvoidUltraProcessed(true)
+        assertTrue(vm.uiState.value.avoidUltraProcessed)
+        vm.setAvoidUltraProcessed(false)
+        assertFalse(vm.uiState.value.avoidUltraProcessed)
+    }
 }
 
 private class FakePreferenceRepository(
     initial: UserFoodPreferences = UserFoodPreferences(),
+    initialNutritionFields: Set<String> = NutritionDisplayOption.DEFAULT_KEYS,
 ) : PreferenceRepository {
     private val _prefs = MutableStateFlow(initial)
     private val _onboarding = MutableStateFlow(false)
-    private val _nutritionFields = MutableStateFlow(NutritionDisplayOption.DEFAULT_KEYS)
+    private val _nutritionFields = MutableStateFlow(initialNutritionFields)
     var savedPreferences: UserFoodPreferences? = null
+    var savedNutritionFields: Set<String>? = null
     val onboardingCompleted: Boolean get() = _onboarding.value
 
     override fun getUserPreferences(): Flow<UserFoodPreferences> = _prefs
@@ -178,6 +261,7 @@ private class FakePreferenceRepository(
     override fun observeSelectedNutritionFields(): Flow<Set<String>> = _nutritionFields
 
     override suspend fun saveSelectedNutritionFields(fields: Set<String>) {
+        savedNutritionFields = fields
         _nutritionFields.value = fields.ifEmpty { NutritionDisplayOption.DEFAULT_KEYS }
     }
 }

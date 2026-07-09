@@ -1,36 +1,46 @@
 package com.sephylon.foodfitscan.ui.about
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.QrCode2
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
+import androidx.compose.material.icons.filled.QrCodeScanner
+import androidx.compose.material.icons.outlined.FactCheck
+import androidx.compose.material.icons.outlined.HealthAndSafety
+import androidx.compose.material.icons.outlined.Lock
+import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.sephylon.foodfitscan.BuildConfig
 import com.sephylon.foodfitscan.ui.theme.FoodFitScanTheme
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -52,116 +62,137 @@ fun AboutScreen(onBack: () -> Unit) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(horizontal = 16.dp)
+                .padding(horizontal = 20.dp)
                 .verticalScroll(rememberScrollState()),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(24.dp))
 
-            Icon(
-                imageVector = Icons.Default.QrCode2,
-                contentDescription = null,
-                modifier = Modifier.size(64.dp),
-                tint = MaterialTheme.colorScheme.primary,
-            )
+            // ── Hero ────────────────────────────────────────────────────────
+            Box(
+                modifier = Modifier
+                    .size(88.dp)
+                    .clip(RoundedCornerShape(28.dp))
+                    .background(
+                        Brush.linearGradient(
+                            listOf(
+                                MaterialTheme.colorScheme.primaryContainer,
+                                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                            ),
+                        ),
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Default.QrCodeScanner,
+                    contentDescription = null,
+                    modifier = Modifier.size(44.dp),
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
+
+            Spacer(Modifier.height(16.dp))
 
             Text(
                 text = "FoodFit Scan",
                 style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.primary,
             )
 
+            Spacer(Modifier.height(8.dp))
+
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.surfaceVariant,
+            ) {
+                Text(
+                    text = "Version ${BuildConfig.VERSION_NAME}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+                )
+            }
+
+            Spacer(Modifier.height(14.dp))
+
             Text(
-                text = "A barcode food label helper to check how packaged products fit your allergens, dietary needs, and nutrition goals.",
+                text = "Scan or search packaged food to see how it fits your allergens and nutrition goals.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 12.dp),
             )
 
-            Text(
-                text = "Version 1.0",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Spacer(Modifier.height(28.dp))
 
-            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-
-            AboutCard(title = "Data Source") {
-                Text(
-                    text = "Product data and images are provided by Open Food Facts (openfoodfacts.org), a non-profit food products database.",
-                    style = MaterialTheme.typography.bodyMedium,
+            // ── Info tiles ──────────────────────────────────────────────────
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                InfoTile(
+                    icon = Icons.Outlined.Public,
+                    title = "Data source",
+                    body = "Product data comes from Open Food Facts, a community database, " +
+                        "under the Open Database Licence (ODbL); images are CC BY-SA. " +
+                        "This app is not affiliated with Open Food Facts.",
                 )
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    text = "This app is not affiliated with or endorsed by Open Food Facts.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                InfoTile(
+                    icon = Icons.Outlined.FactCheck,
+                    title = "Check the packaging",
+                    body = "Data may be incomplete or outdated — always check the label, " +
+                        "especially for allergens.",
+                )
+                InfoTile(
+                    icon = Icons.Outlined.HealthAndSafety,
+                    title = "Not medical advice",
+                    body = "FoodFit Scan is an informational helper. For allergy or health " +
+                        "decisions, consult a qualified professional.",
+                )
+                InfoTile(
+                    icon = Icons.Outlined.Lock,
+                    title = "Privacy",
+                    body = "Your preferences and history stay on this device. Only barcode " +
+                        "lookups are sent to the Open Food Facts API.",
                 )
             }
 
-            AboutCard(title = "Data Disclaimer") {
-                Text(
-                    text = "Food data may be incomplete or inaccurate. Always check the product packaging, especially for allergens.",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            }
-
-            AboutCard(title = "Medical Disclaimer") {
-                Text(
-                    text = "FoodFit Scan is an informational food label helper, not medical or dietary advice. Do not rely on this app to manage allergies, medical conditions, or dietary treatments. Always consult a qualified healthcare professional for medical and nutritional guidance.",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            }
-
-            AboutCard(title = "Open Food Facts Licence") {
-                Text(
-                    text = "Open Food Facts data is available under the Open Database Licence (ODbL). Product images are available under Creative Commons Attribution ShareAlike.",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            }
-
-            AboutCard(title = "Privacy") {
-                Text(
-                    text = "Your preferences, scan history, and product cache are stored on this device only. No personal data is transmitted to any server.",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    text = "Barcode lookups are sent to the Open Food Facts API to retrieve product information.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    text = "Privacy policy: coming before Play Store release.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(24.dp))
         }
     }
 }
 
 @Composable
-private fun AboutCard(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Card(
+private fun InfoTile(icon: ImageVector, title: String, body: String) {
+    Surface(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.primary,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Spacer(Modifier.height(8.dp))
-            content()
+        Row(modifier = Modifier.padding(16.dp)) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = body,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }

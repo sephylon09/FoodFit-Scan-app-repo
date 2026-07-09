@@ -213,6 +213,63 @@ class ProductRepositoryImplTest {
     }
 
     @Test
+    fun `findAlternativesFor returns similar-category candidates ranked healthier first`() = runTest {
+        val product = sampleProduct("CURRENT").copy(
+            categoriesTags = listOf("en:snacks", "en:bars", "en:protein-bars"),
+        )
+        val sameTypeGradeC = sampleProduct("ALT_C").copy(
+            name = "Protein Bar C",
+            nutriScore = "c",
+            categoriesTags = listOf("en:snacks", "en:bars", "en:protein-bars"),
+        )
+        val sameTypeGradeA = sampleProduct("ALT_A").copy(
+            name = "Protein Bar A",
+            nutriScore = "a",
+            categoriesTags = listOf("en:snacks", "en:bars", "en:protein-bars"),
+        )
+        val unrelatedWater = sampleProduct("WATER").copy(
+            name = "Spring Water",
+            nutriScore = "a",
+            categoriesTags = listOf("en:beverages", "en:waters"),
+        )
+        val client = FakeClient(
+            ProductLookupResult.NotFound("x"),
+            searchProducts = listOf(sameTypeGradeC, unrelatedWater, sameTypeGradeA),
+        )
+        val (repo) = buildRepo(client)
+
+        val result = repo.findAlternativesFor(product, UserFoodPreferences())
+
+        assertTrue(result is AlternativesResult.Success)
+        val barcodes = (result as AlternativesResult.Success).alternatives.map { it.barcode }
+        assertEquals(listOf("ALT_A", "ALT_C"), barcodes)
+        // Enough similar candidates from the most specific tag -> no fallback query.
+        assertEquals(listOf("en:protein-bars"), client.searchedTags)
+    }
+
+    @Test
+    fun `findAlternativesFor queries broader tag when specific tag yields too few`() = runTest {
+        val product = sampleProduct("CURRENT").copy(
+            categoriesTags = listOf("en:snacks", "en:bars", "en:protein-bars"),
+        )
+        // Candidates only loosely related: excluded by the overlap rule, forcing the fallback.
+        val loose = sampleProduct("LOOSE").copy(
+            name = "Generic Snack",
+            categoriesTags = listOf("en:snacks"),
+        )
+        val client = FakeClient(
+            ProductLookupResult.NotFound("x"),
+            searchProducts = listOf(loose),
+        )
+        val (repo) = buildRepo(client)
+
+        val result = repo.findAlternativesFor(product, UserFoodPreferences())
+
+        assertTrue(result is AlternativesResult.Empty)
+        assertEquals(listOf("en:protein-bars", "en:bars"), client.searchedTags)
+    }
+
+    @Test
     fun `getProduct falls back to stale cache when network fails`() = runTest {
         val product = sampleProduct("5449000000996")
         val client = FakeClient(ProductLookupResult.NetworkError("offline"))
@@ -283,6 +340,7 @@ private class FakeClient(
 ) : OpenFoodFactsClient {
     var wasCalled = false
     var lastBarcode: String? = null
+    val searchedTags = mutableListOf<String>()
 
     override suspend fun getProduct(barcode: String): ProductLookupResult {
         wasCalled = true
@@ -291,6 +349,7 @@ private class FakeClient(
     }
 
     override suspend fun searchByCategory(categoryTag: String, pageSize: Int): List<ProductDetails> {
+        searchedTags.add(categoryTag)
         if (searchException != null) throw searchException
         return searchProducts
     }

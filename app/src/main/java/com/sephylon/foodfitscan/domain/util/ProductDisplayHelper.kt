@@ -5,11 +5,18 @@ import com.sephylon.foodfitscan.domain.model.NutritionFacts
 
 object ProductDisplayHelper {
 
-    /** A single nutrition row ready for display: a label and a formatted value. */
+    /**
+     * A single nutrition row ready for display: a label, a formatted value, and — for
+     * the animated level bar — the raw per-100g amount, its unit, and the optional
+     * [NutritionLevelGuide] limit ([guideLimit] null means "no bar for this field").
+     */
     data class NutritionDisplayRow(
         val key: String,
         val label: String,
         val value: String,
+        val rawValue: Double? = null,
+        val unit: String = "g",
+        val guideLimit: Double? = null,
     )
 
     fun formatNutrient(value: Double?, unit: String = "g"): String =
@@ -26,10 +33,35 @@ object ProductDisplayHelper {
         selectedKeys: Set<String>?,
     ): List<NutritionDisplayRow> =
         NutritionDisplayOption.resolveSelected(selectedKeys).map { option ->
+            val value = nutrition?.let { option.valueFrom(it) }
             NutritionDisplayRow(
                 key = option.key,
                 label = option.displayName,
-                value = formatNutrient(nutrition?.let { option.valueFrom(it) }, option.unit),
+                value = formatNutrient(value, option.unit),
+                rawValue = value,
+                unit = option.unit,
+                guideLimit = NutritionLevelGuide.guideLimitFor(option),
+            )
+        }
+
+    /**
+     * Like [selectedNutritionRows] but omits fields the product has no data for,
+     * supporting the hide-when-missing display rule. May be empty when the product
+     * has no nutrition data at all.
+     */
+    fun availableNutritionRows(
+        nutrition: NutritionFacts?,
+        selectedKeys: Set<String>?,
+    ): List<NutritionDisplayRow> =
+        NutritionDisplayOption.resolveSelected(selectedKeys).mapNotNull { option ->
+            val value = nutrition?.let { option.valueFrom(it) } ?: return@mapNotNull null
+            NutritionDisplayRow(
+                key = option.key,
+                label = option.displayName,
+                value = formatNutrient(value, option.unit),
+                rawValue = value,
+                unit = option.unit,
+                guideLimit = NutritionLevelGuide.guideLimitFor(option),
             )
         }
 
