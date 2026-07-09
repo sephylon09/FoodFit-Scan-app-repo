@@ -2,6 +2,9 @@ name: Sync Open Food Facts CSV to Firestore
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/sync-open-food-facts-csv.yml"
   schedule:
     # Temporary test schedule: every 10 minutes.
     - cron: "*/10 * * * *"
