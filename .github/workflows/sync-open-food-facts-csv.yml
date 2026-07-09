@@ -2,14 +2,22 @@ name: Sync Open Food Facts CSV to Firestore
 
 on:
   workflow_dispatch:
+    inputs:
+      chunks:
+        description: "Number of CSV chunks to process"
+        required: false
+        default: "1"
   push:
     paths:
       - ".github/workflows/sync-open-food-facts-csv.yml"
-  schedule:
-    # Temporary test schedule: every 10 minutes.
-    - cron: "*/10 * * * *"
+  # Temporary 10-minute test schedule removed: scheduled cron was not firing
+  # reliably. Advance the importer with a manual bulk run via workflow_dispatch
+  # instead (set the "chunks" input, max 24). Re-enable a cron here only once
+  # scheduling is confirmed working.
+  # schedule:
+  #   - cron: "*/10 * * * *"
 
-# A slow run must not overlap the next hourly trigger and double-write.
+# A slow run must not overlap another trigger and double-write.
 concurrency:
   group: sync-off-csv
   cancel-in-progress: false
@@ -35,4 +43,5 @@ jobs:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           MAX_FIRESTORE_WRITES_PER_RUN: ${{ secrets.MAX_FIRESTORE_WRITES_PER_RUN }}
           OPEN_FOOD_FACTS_USER_AGENT: ${{ secrets.OPEN_FOOD_FACTS_USER_AGENT }}
+          CSV_SYNC_CHUNKS_PER_RUN: ${{ github.event.inputs.chunks || '1' }}
         run: npm run sync:off-csv

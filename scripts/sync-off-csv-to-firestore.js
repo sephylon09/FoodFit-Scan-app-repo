@@ -33,14 +33,22 @@ const COUNTRY_ROTATION = [
   "en:italy",
 ];
 
-// Per-run limits. A run stops once it has written this many matching products,
-// scanned this many CSV rows, or finished a full CSV pass for the current
-// country — whichever comes first.
+// Per-chunk limits. A chunk stops once it has written this many matching
+// products, scanned this many CSV rows, or finished a full CSV pass for the
+// current country — whichever comes first. A single execution may process
+// several chunks back to back (see getChunksPerRun).
 const DEFAULT_MAX_WRITES = 500;
-const MAX_ROWS_TO_SCAN_PER_RUN = 250000;
+const MAX_ROWS_TO_SCAN_PER_CHUNK = 250000;
 const BATCH_SIZE = 450;
 const HEARTBEAT_ROW_INTERVAL = 25000;
 const CURSOR_SKIP_LOG_INTERVAL = 250000;
+
+// Manual bulk sync. Scheduled cron has been unreliable, so one execution can
+// process up to MAX_CHUNKS_PER_RUN sequential chunks — advancing the importer
+// as far as ~24 separate runs would — instead of re-triggering the workflow by
+// hand. Chunks always run one after another, never concurrently.
+const DEFAULT_CHUNKS_PER_RUN = 1;
+const MAX_CHUNKS_PER_RUN = 24;
 
 // The Open Food Facts CSV has ~200 columns; only these are read. Positions
 // come from the header row, so upstream column reordering is harmless.
@@ -65,6 +73,20 @@ function getMaxWrites() {
   }
 
   return Math.min(parsed, DEFAULT_MAX_WRITES);
+}
+
+// Missing / invalid → 1. Clamped to [1, MAX_CHUNKS_PER_RUN] so a single manual
+// run can advance the importer by at most 24 chunks and cannot request an
+// unbounded execution time.
+function getChunksPerRun() {
+  const raw = process.env.CSV_SYNC_CHUNKS_PER_RUN;
+  const parsed = Number.parseInt(raw || String(DEFAULT_CHUNKS_PER_RUN), 10);
+
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_CHUNKS_PER_RUN;
+  }
+
+  return Math.min(parsed, MAX_CHUNKS_PER_RUN);
 }
 
 function normalizeCountryIndex(rawIndex) {
@@ -336,38 +358,47 @@ async function saveRotationState(db, fields) {
   await ref.set(payload, { merge: true });
 }
 
-async function runCsvSync() {
-  const db = initializeFirebase();
-  const userAgent = requireEnv("OPEN_FOOD_FACTS_USER_AGENT");
-  const maxWrites = getMaxWrites();
-
-  const rotationState = await getRotationState(db);
-  const currentCountryIndex = rotationState.currentCountryIndex;
-  const currentCountryTag = COUNTRY_ROTATION[currentCountryIndex];
-
-  const currentProgress = rotationState.countryProgress[currentCountryTag] || {};
-  const startAfterRow = Number(currentProgress.lastProcessedRow || 0);
-  const countrySavedBefore = Number(currentProgress.totalSaved || 0);
-  const totalSavedAllBefore = Number(rotationState.totalSavedAllCountries || 0);
-
-  console.log("Starting Open Food Facts CSV → Firestore country-rotation sync");
-  console.log(`CSV URL: ${CSV_URL}`);
-  console.log(`Collection: ${COLLECTION_NAME}`);
-  console.log(`Current country index: ${currentCountryIndex} of ${COUNTRY_ROTATION.length}`);
-  console.log(`Current country tag: ${currentCountryTag}`);
-  console.log(`Start after row: ${startAfterRow}`);
-  console.log(`Max writes this run: ${maxWrites}`);
-  console.log(`Max rows to scan this run: ${MAX_ROWS_TO_SCAN_PER_RUN}`);
+// Streams one country's CSV pass and processes as many chunks as the remaining
+// budget allows against that SINGLE open stream. A chunk that stops on the
+// write cap or the row cap simply keeps reading from where it paused, so the
+// CSV is only re-fetched when a country finishes its pass and the rotation
+// advances to the next country — not once per chunk.
+//
+// Returns aggregate counters plus whether this country finished a full pass and
+// any (non-fatal) stream error, so the caller can advance the rotation and its
+// run-level totals.
+async function processCountryStream(db, options) {
+  const {
+    userAgent,
+    maxWrites,
+    maxRows,
+    currentCountryIndex,
+    currentCountryTag,
+    startAfterRow,
+    countrySavedBefore,
+    totalSavedAllBase,
+    chunkBudget,
+    chunkNumberBase,
+    countryProgressSnapshot,
+  } = options;
 
   let rowNumber = 0;
-  let scannedThisRun = 0;
-  let matched = 0;
-  let written = 0;
-  let skipped = 0;
+  // Cumulative over the whole stream (this country, this run).
+  let writtenThisCountry = 0;
+  let scannedThisCountry = 0;
+  let matchedThisCountry = 0;
+  let skippedThisCountry = 0;
+  // Per-chunk counters, reset at every chunk boundary.
+  let writtenThisChunk = 0;
+  let scannedThisChunk = 0;
+  let matchedThisChunk = 0;
+  let skippedThisChunk = 0;
+  let chunkStartRow = startAfterRow;
+
+  let chunksCompletedHere = 0;
   let batchesCommitted = 0;
-  let stoppedBecauseWriteLimit = false;
-  let stoppedBecauseRowLimit = false;
   let streamError = null;
+  let stopReason = null; // 'budget' | 'completed' | 'error'
 
   let batch = db.batch();
   let batchCount = 0;
@@ -394,34 +425,97 @@ async function runCsvSync() {
 
     batchesCommitted++;
     console.log(
-      `Committed ${label} batch #${batchesCommitted}: country=${currentCountryTag}, writes=${committingCount}, row=${rowNumber}, scanned=${scannedThisRun}, matched=${matched}, written=${written}`
+      `Committed ${label} batch #${batchesCommitted}: country=${currentCountryTag}, writes=${committingCount}, row=${rowNumber}, scanned=${scannedThisCountry}, matched=${matchedThisCountry}, written=${writtenThisCountry}`
     );
 
-    // Persist the cursor after every successful commit so a crash later in the
-    // run resumes here instead of at the previous run's cursor.
+    // Persist the cursor after every successful commit so a crash mid-chunk
+    // resumes here instead of at the chunk's start row.
     try {
       await saveRotationState(db, {
         currentCountryIndex,
         currentCountryTag,
         currentCountryLastProcessedRow: rowNumber,
-        totalSavedAllCountries: totalSavedAllBefore + written,
+        totalSavedAllCountries: totalSavedAllBase + writtenThisCountry,
         progressTag: currentCountryTag,
         progressLastProcessedRow: rowNumber,
-        progressTotalSaved: countrySavedBefore + written,
+        progressTotalSaved: countrySavedBefore + writtenThisCountry,
         progressCompletedFullPass: false,
         lastResult: "partial_progress",
-        lastWritten: written,
-        lastScannedRows: scannedThisRun,
-        lastMatchedRows: matched,
-        lastSkipped: skipped,
+        lastWritten: writtenThisCountry,
+        lastScannedRows: scannedThisCountry,
+        lastMatchedRows: matchedThisCountry,
+        lastSkipped: skippedThisCountry,
         completedCountryThisRun: false,
       });
     } catch (error) {
       error.isPersistenceFailure = true;
       throw error;
     }
+  }
 
-    console.log(`Saved cursor after batch #${batchesCommitted}: lastProcessedRow=${rowNumber}`);
+  // Persists the durable cursor at a chunk boundary and logs the chunk summary.
+  // On a completed country pass the rotation pointer advances to the next
+  // country and this country's cursor resets to 0; otherwise the cursor holds
+  // this country's current row so the next chunk / run resumes there.
+  async function saveChunkBoundary({ completed, error }) {
+    const chunkNumber = chunkNumberBase + chunksCompletedHere + 1;
+
+    if (completed) {
+      const nextCountryIndex = (currentCountryIndex + 1) % COUNTRY_ROTATION.length;
+      const nextCountryTag = COUNTRY_ROTATION[nextCountryIndex];
+      const nextCountryStartRow = Number(
+        (countryProgressSnapshot[nextCountryTag] || {}).lastProcessedRow || 0
+      );
+
+      await saveRotationState(db, {
+        currentCountryIndex: nextCountryIndex,
+        currentCountryTag: nextCountryTag,
+        currentCountryLastProcessedRow: nextCountryStartRow,
+        totalSavedAllCountries: totalSavedAllBase + writtenThisCountry,
+        progressTag: currentCountryTag,
+        progressLastProcessedRow: 0,
+        progressTotalSaved: countrySavedBefore + writtenThisCountry,
+        progressCompletedFullPass: true,
+        lastResult: "success",
+        lastWritten: writtenThisChunk,
+        lastScannedRows: scannedThisChunk,
+        lastMatchedRows: matchedThisChunk,
+        lastSkipped: skippedThisChunk,
+        completedCountryThisRun: true,
+      });
+
+      console.log(
+        `Chunk ${chunkNumber} complete: country=${currentCountryTag}, startRow=${chunkStartRow}, written=${writtenThisChunk}, scanned=${scannedThisChunk}, savedCursor=0 (full CSV pass done → advancing to ${nextCountryTag})`
+      );
+      return;
+    }
+
+    // Partial chunk (write cap, row cap, or stream error). Never rewind the
+    // cursor below where earlier runs already reached: an error during the
+    // skip-to-cursor phase would otherwise lose recorded progress.
+    const cursorRow = Math.max(rowNumber, startAfterRow);
+
+    await saveRotationState(db, {
+      currentCountryIndex,
+      currentCountryTag,
+      currentCountryLastProcessedRow: cursorRow,
+      totalSavedAllCountries: totalSavedAllBase + writtenThisCountry,
+      progressTag: currentCountryTag,
+      progressLastProcessedRow: cursorRow,
+      progressTotalSaved: countrySavedBefore + writtenThisCountry,
+      progressCompletedFullPass: false,
+      lastResult: error ? "stopped_or_error" : "partial_progress",
+      lastWritten: writtenThisChunk,
+      lastScannedRows: scannedThisChunk,
+      lastMatchedRows: matchedThisChunk,
+      lastSkipped: skippedThisChunk,
+      completedCountryThisRun: false,
+      lastError: error ? error.message : undefined,
+    });
+
+    console.log(
+      `Chunk ${chunkNumber} ${error ? "stopped" : "complete"}: country=${currentCountryTag}, startRow=${chunkStartRow}, written=${writtenThisChunk}, scanned=${scannedThisChunk}, savedCursor=${cursorRow}`
+    );
   }
 
   const response = await openUrlWithRedirects(CSV_URL, userAgent);
@@ -434,7 +528,7 @@ async function runCsvSync() {
 
   // .pipe() does not forward errors: without this wiring a download or gzip
   // failure would leave the line reader waiting forever. Recording the error
-  // and closing the reader lets the run finish cleanly as a partial pass.
+  // and closing the reader lets the chunk finish cleanly as a partial pass.
   let inputError = null;
   let closingStreams = false;
   const failInput = (error) => {
@@ -466,11 +560,12 @@ async function runCsvSync() {
         continue;
       }
 
-      scannedThisRun++;
+      scannedThisChunk++;
+      scannedThisCountry++;
 
-      if (scannedThisRun % HEARTBEAT_ROW_INTERVAL === 0) {
+      if (scannedThisCountry % HEARTBEAT_ROW_INTERVAL === 0) {
         console.log(
-          `Still scanning: country=${currentCountryTag}, row=${rowNumber}, scanned=${scannedThisRun}, matched=${matched}, written=${written}, skipped=${skipped}`
+          `Still scanning: country=${currentCountryTag}, row=${rowNumber}, scannedChunk=${scannedThisChunk}, matched=${matchedThisCountry}, written=${writtenThisCountry}, skipped=${skippedThisCountry}`
         );
       }
 
@@ -480,17 +575,20 @@ async function runCsvSync() {
         const row = parseRow(line, columnIndexes);
 
         if (rowMatchesCountry(row, currentCountryTag)) {
-          matched++;
+          matchedThisChunk++;
+          matchedThisCountry++;
 
           const compact = compactProduct(row, currentCountryTag);
 
           if (!compact) {
-            skipped++;
+            skippedThisChunk++;
+            skippedThisCountry++;
           } else {
             const docRef = db.collection(COLLECTION_NAME).doc(compact.barcode);
             batch.set(docRef, compact, { merge: true });
             batchCount++;
-            written++;
+            writtenThisChunk++;
+            writtenThisCountry++;
 
             if (batchCount >= BATCH_SIZE) {
               await commitCurrentBatch("progress");
@@ -499,16 +597,35 @@ async function runCsvSync() {
         }
       }
 
-      if (written >= maxWrites) {
-        stoppedBecauseWriteLimit = true;
-        console.log(`Stopping: reached max Firestore writes for this run (${maxWrites}) at row=${rowNumber}.`);
-        break;
-      }
+      // Chunk boundary: a chunk ends when it hits the per-chunk write cap or
+      // the per-chunk row cap. Commit any pending writes BEFORE saving the
+      // cursor so the cursor never advances past uncommitted rows.
+      const hitWriteCap = writtenThisChunk >= maxWrites;
+      const hitRowCap = scannedThisChunk >= maxRows;
 
-      if (scannedThisRun >= MAX_ROWS_TO_SCAN_PER_RUN) {
-        stoppedBecauseRowLimit = true;
-        console.log(`Stopping: reached max rows to scan for this run (${MAX_ROWS_TO_SCAN_PER_RUN}) at row=${rowNumber}.`);
-        break;
+      if (hitWriteCap || hitRowCap) {
+        console.log(
+          hitWriteCap
+            ? `Chunk hit max writes (${maxWrites}) at row=${rowNumber}.`
+            : `Chunk hit max scanned rows (${maxRows}) at row=${rowNumber}.`
+        );
+
+        await commitCurrentBatch("chunk");
+        await saveChunkBoundary({ completed: false });
+        chunksCompletedHere++;
+
+        if (chunksCompletedHere >= chunkBudget) {
+          stopReason = "budget";
+          break;
+        }
+
+        // Keep reading the SAME stream for the next chunk; only the per-chunk
+        // counters reset.
+        writtenThisChunk = 0;
+        scannedThisChunk = 0;
+        matchedThisChunk = 0;
+        skippedThisChunk = 0;
+        chunkStartRow = rowNumber;
       }
     }
   } catch (error) {
@@ -533,72 +650,134 @@ async function runCsvSync() {
     streamError = inputError;
   }
 
-  await commitCurrentBatch("final");
-
-  // A full pass only happens when the stream drained on its own without hitting
-  // either per-run limit and without a stream error.
-  const completedCountryThisRun =
-    !stoppedBecauseWriteLimit && !stoppedBecauseRowLimit && streamError === null;
-
-  // Never move a country's cursor backward: an error during the skip-to-cursor
-  // phase would otherwise rewind progress recorded by earlier runs.
-  const partialNextRow = Math.max(rowNumber, startAfterRow);
-
-  let savedCountryRow;
-  let nextCountryIndex;
-
-  if (completedCountryThisRun) {
-    // Country finished: reset its cursor, mark the pass complete, and advance
-    // the top-level pointer to the next country (looping back at the end).
-    savedCountryRow = 0;
-    nextCountryIndex = (currentCountryIndex + 1) % COUNTRY_ROTATION.length;
-  } else {
-    savedCountryRow = partialNextRow;
-    nextCountryIndex = currentCountryIndex;
-  }
-
-  const nextCountryTag = COUNTRY_ROTATION[nextCountryIndex];
-  const nextCountryStartRow = completedCountryThisRun
-    ? Number((rotationState.countryProgress[nextCountryTag] || {}).lastProcessedRow || 0)
-    : savedCountryRow;
-
-  await saveRotationState(db, {
-    currentCountryIndex: nextCountryIndex,
-    currentCountryTag: nextCountryTag,
-    currentCountryLastProcessedRow: nextCountryStartRow,
-    totalSavedAllCountries: totalSavedAllBefore + written,
-    progressTag: currentCountryTag,
-    progressLastProcessedRow: savedCountryRow,
-    progressTotalSaved: countrySavedBefore + written,
-    progressCompletedFullPass: completedCountryThisRun,
-    lastResult: streamError ? "stopped_or_error" : "success",
-    lastWritten: written,
-    lastScannedRows: scannedThisRun,
-    lastMatchedRows: matched,
-    lastSkipped: skipped,
-    completedCountryThisRun,
-    lastError: streamError ? streamError.message : undefined,
-  });
-
   if (streamError) {
+    // Flush whatever committed, record a partial cursor, count the partial as a
+    // chunk, and let the caller stop the bulk run — re-streaming after a stream
+    // error is risky, so we do not roll into more chunks.
+    await commitCurrentBatch("final");
+    await saveChunkBoundary({ completed: false, error: streamError });
+    chunksCompletedHere++;
+    stopReason = "error";
     console.log(`CSV stream stopped: ${streamError.message}`);
+  } else if (stopReason === "budget") {
+    // The chunk that exhausted the budget already saved its boundary above.
+  } else {
+    // The stream drained without hitting a cap or erroring → this country
+    // finished a full CSV pass. That final (possibly small) chunk still counts.
+    await commitCurrentBatch("final");
+    await saveChunkBoundary({ completed: true });
+    chunksCompletedHere++;
+    stopReason = "completed";
   }
 
-  console.log("CSV sync complete.");
-  console.log(`Country: ${currentCountryTag}`);
-  console.log(`Last processed row saved: ${savedCountryRow}`);
-  console.log(`Scanned rows this run: ${scannedThisRun}`);
-  console.log(`Matched rows: ${matched}`);
-  console.log(`Written: ${written}`);
-  console.log(`Skipped: ${skipped}`);
-  console.log(`Batches committed: ${batchesCommitted}`);
-  console.log(`Completed country full pass: ${completedCountryThisRun}`);
-  console.log(`Next country: ${nextCountryTag}`);
+  const completedFullPass = stopReason === "completed";
+  const finalCursorRow = completedFullPass ? 0 : Math.max(rowNumber, startAfterRow);
+
+  return {
+    chunksCompletedHere,
+    writtenThisCountry,
+    scannedThisCountry,
+    matchedThisCountry,
+    skippedThisCountry,
+    finalCursorRow,
+    completedFullPass,
+    streamError,
+    batchesCommitted,
+  };
+}
+
+async function runCsvSync() {
+  const db = initializeFirebase();
+  const userAgent = requireEnv("OPEN_FOOD_FACTS_USER_AGENT");
+  const maxWrites = getMaxWrites();
+  const maxRows = MAX_ROWS_TO_SCAN_PER_CHUNK;
+  const chunksPerRun = getChunksPerRun();
+
+  const rawChunksRequested = Number.parseInt(
+    process.env.CSV_SYNC_CHUNKS_PER_RUN || String(DEFAULT_CHUNKS_PER_RUN),
+    10
+  );
+  const chunksRequested = Number.isFinite(rawChunksRequested) && rawChunksRequested > 0
+    ? rawChunksRequested
+    : DEFAULT_CHUNKS_PER_RUN;
+
+  console.log("Starting Open Food Facts CSV → Firestore country-rotation sync (bulk chunk mode)");
+  console.log(`CSV URL: ${CSV_URL}`);
+  console.log(`Collection: ${COLLECTION_NAME}`);
+  console.log(`Chunks requested: ${chunksRequested}`);
+  console.log(`Chunks capped to: ${chunksPerRun} (max ${MAX_CHUNKS_PER_RUN})`);
+  console.log(`Max writes per chunk: ${maxWrites}`);
+  console.log(`Max rows to scan per chunk: ${maxRows}`);
+
+  let chunksCompleted = 0;
+  let totalWrittenAllChunks = 0;
+  let countriesStreamed = 0;
+  let finalCountryTag = null;
+  let finalCursorRow = 0;
+  let runStreamError = null;
+
+  // Each iteration opens one stream for the current rotation country and runs
+  // as many chunks as the remaining budget allows. State is re-read from
+  // Firestore every iteration so that when a country completes its pass we pick
+  // up the freshly advanced rotation pointer for the next stream. Chunks are
+  // therefore strictly sequential — a stream fully finishes before the next
+  // one opens, so no two chunks ever run concurrently.
+  while (chunksCompleted < chunksPerRun) {
+    const rotationState = await getRotationState(db);
+    const currentCountryIndex = rotationState.currentCountryIndex;
+    const currentCountryTag = COUNTRY_ROTATION[currentCountryIndex];
+    const currentProgress = rotationState.countryProgress[currentCountryTag] || {};
+    const startAfterRow = Number(currentProgress.lastProcessedRow || 0);
+    const countrySavedBefore = Number(currentProgress.totalSaved || 0);
+    const totalSavedAllBase = Number(rotationState.totalSavedAllCountries || 0);
+    const chunkBudget = chunksPerRun - chunksCompleted;
+
+    console.log(
+      `\n=== Country stream: ${currentCountryTag} (index ${currentCountryIndex}/${COUNTRY_ROTATION.length}), startRow=${startAfterRow}, chunkBudget=${chunkBudget} ===`
+    );
+
+    const result = await processCountryStream(db, {
+      userAgent,
+      maxWrites,
+      maxRows,
+      currentCountryIndex,
+      currentCountryTag,
+      startAfterRow,
+      countrySavedBefore,
+      totalSavedAllBase,
+      chunkBudget,
+      chunkNumberBase: chunksCompleted,
+      countryProgressSnapshot: rotationState.countryProgress,
+    });
+
+    chunksCompleted += result.chunksCompletedHere;
+    totalWrittenAllChunks += result.writtenThisCountry;
+    countriesStreamed++;
+    finalCountryTag = currentCountryTag;
+    finalCursorRow = result.finalCursorRow;
+
+    if (result.streamError) {
+      runStreamError = result.streamError;
+      console.log(`Stopping bulk run early after stream error: ${result.streamError.message}`);
+      break;
+    }
+  }
+
+  console.log("\nCSV bulk sync complete.");
+  console.log(`Total chunks completed: ${chunksCompleted} of ${chunksPerRun} requested`);
+  console.log(`Total written across all chunks: ${totalWrittenAllChunks}`);
+  console.log(`Country streams opened this run: ${countriesStreamed}`);
+  console.log(`Final country: ${finalCountryTag}`);
+  console.log(`Final cursor row: ${finalCursorRow}`);
+  if (runStreamError) {
+    console.log(`Ended early due to stream error: ${runStreamError.message}`);
+  }
 }
 
 module.exports = {
   COUNTRY_ROTATION,
   normalizeCountryIndex,
+  getChunksPerRun,
   openUrlWithRedirects,
   normalizeText,
   buildPrefixes,
@@ -607,6 +786,8 @@ module.exports = {
   compactProduct,
   buildColumnIndexes,
   parseRow,
+  processCountryStream,
+  runCsvSync,
 };
 
 if (require.main === module) {
