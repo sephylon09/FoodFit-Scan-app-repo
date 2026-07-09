@@ -1,0 +1,21 @@
+name: Test Scheduled Workflow
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/test-schedule.yml"
+  schedule:
+    - cron: "*/10 * * * *"
+
+jobs:
+  test-schedule:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print schedule test
+        run: |
+          echo "Scheduled workflow test ran."
+          echo "UTC time:"
+          date -u
+          echo "Local runner time:"
+          date
