@@ -3,8 +3,8 @@ name: Sync Open Food Facts CSV to Firestore
 on:
   workflow_dispatch:
   schedule:
-    # Minute 17 avoids the busy top-of-hour window; runs once per hour.
-    - cron: "17 * * * *"
+    # Temporary test schedule: every 10 minutes.
+    - cron: "*/10 * * * *"
 
 # A slow run must not overlap the next hourly trigger and double-write.
 concurrency:
