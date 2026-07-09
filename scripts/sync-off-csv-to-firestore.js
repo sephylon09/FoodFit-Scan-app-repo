@@ -6,18 +6,39 @@ const readline = require("readline");
 
 const COLLECTION_NAME = "product_search_index";
 const SYNC_STATE_COLLECTION = "sync_state";
-const SYNC_STATE_DOC = "open_food_facts_csv";
+const SYNC_STATE_DOC = "open_food_facts_country_rotation";
 
 const CSV_URL = "https://static.openfoodfacts.org/data/en.openfoodfacts.org.products.csv.gz";
 
-const COUNTRY_TAG = "en:singapore";
-const DEFAULT_MAX_WRITES = 18000;
+// Priority rotation. Many products sold in Singapore supermarkets / convenience
+// stores are tagged under a neighbouring or major-import country rather than
+// (or in addition to) en:singapore, so the index is built country by country.
+const COUNTRY_ROTATION = [
+  "en:singapore",
+  "en:malaysia",
+  "en:indonesia",
+  "en:thailand",
+  "en:japan",
+  "en:south-korea",
+  "en:china",
+  "en:taiwan",
+  "en:hong-kong",
+  "en:australia",
+  "en:new-zealand",
+  "en:united-states",
+  "en:united-kingdom",
+  "en:india",
+  "en:france",
+  "en:germany",
+  "en:italy",
+];
 
-// Keep each GitHub Actions run short and memory-safe: stop cleanly after this
-// many scanned rows and let the saved cursor resume on the next run.
+// Per-run limits. A run stops once it has written this many matching products,
+// scanned this many CSV rows, or finished a full CSV pass for the current
+// country — whichever comes first.
+const DEFAULT_MAX_WRITES = 500;
 const MAX_ROWS_TO_SCAN_PER_RUN = 250000;
-
-const BATCH_COMMIT_SIZE = 450;
+const BATCH_SIZE = 450;
 const HEARTBEAT_ROW_INTERVAL = 25000;
 const CURSOR_SKIP_LOG_INTERVAL = 250000;
 
@@ -34,6 +55,7 @@ function requireEnv(name) {
   return value;
 }
 
+// Missing → default 500. Set higher than 500 → capped to 500 for hourly safety.
 function getMaxWrites() {
   const raw = process.env.MAX_FIRESTORE_WRITES_PER_RUN;
   const parsed = Number.parseInt(raw || String(DEFAULT_MAX_WRITES), 10);
@@ -43,6 +65,19 @@ function getMaxWrites() {
   }
 
   return Math.min(parsed, DEFAULT_MAX_WRITES);
+}
+
+function normalizeCountryIndex(rawIndex) {
+  const length = COUNTRY_ROTATION.length;
+  const parsed = Number(rawIndex);
+
+  if (!Number.isFinite(parsed)) {
+    return 0;
+  }
+
+  const floored = Math.trunc(parsed);
+  // Wrap into range so an index that ran past the end loops back to 0.
+  return ((floored % length) + length) % length;
 }
 
 function openUrlWithRedirects(url, userAgent, redirectCount = 0) {
@@ -132,6 +167,8 @@ function buildPrefixes(name, brand) {
     }
   }
 
+  // Keep the array small so documents stay light and the whereArrayContains
+  // index does not blow up.
   return Array.from(prefixes).slice(0, 100);
 }
 
@@ -144,12 +181,11 @@ function splitTags(value) {
     .filter(Boolean);
 }
 
-function rowContainsSingapore(row) {
-  const countryTags = splitTags(row.countries_tags);
-  return countryTags.includes(COUNTRY_TAG);
+function rowMatchesCountry(row, countryTag) {
+  return splitTags(row.countries_tags).includes(countryTag);
 }
 
-function compactProduct(row) {
+function compactProduct(row, matchedCountryTag) {
   const barcode = String(row.code || "").trim();
   const name = String(row.product_name || "").trim();
   const brand = row.brands ? String(row.brands).trim() : null;
@@ -171,6 +207,7 @@ function compactProduct(row) {
     searchName: normalizeText(`${name} ${brand || ""}`),
     searchPrefixes: buildPrefixes(name, brand),
     source: "openfoodfacts_csv",
+    matchedCountryTag,
     lastModifiedFromApi: row.last_modified_t ? Number(row.last_modified_t) : null,
     updatedAt: Date.now(),
   };
@@ -229,39 +266,74 @@ function parseRow(line, columnIndexes) {
   };
 }
 
-async function getSyncState(db) {
+async function getRotationState(db) {
   const ref = db.collection(SYNC_STATE_COLLECTION).doc(SYNC_STATE_DOC);
   const snap = await ref.get();
+  const data = snap.exists ? snap.data() || {} : {};
 
-  if (!snap.exists) {
-    return {
-      lastProcessedRow: 0,
-      totalSaved: 0,
-      completedFullPass: false,
-    };
-  }
-
-  const data = snap.data() || {};
+  const countryProgress =
+    data.countryProgress && typeof data.countryProgress === "object"
+      ? data.countryProgress
+      : {};
 
   return {
-    lastProcessedRow: Number(data.lastProcessedRow || 0),
-    totalSaved: Number(data.totalSaved || 0),
-    completedFullPass: Boolean(data.completedFullPass || false),
+    currentCountryIndex: normalizeCountryIndex(data.currentCountryIndex || 0),
+    totalSavedAllCountries: Number(data.totalSavedAllCountries || 0),
+    countryProgress,
   };
 }
 
-async function saveSyncState(db, state) {
-  const ref = db.collection(SYNC_STATE_COLLECTION).doc(SYNC_STATE_DOC);
+// Writes the rotation state with a deep merge so per-country progress for other
+// countries is preserved. `progressTag` may differ from `currentCountryTag`:
+// when a country finishes its full pass we record that country's progress while
+// the top-level pointer already advances to the next country.
+async function saveRotationState(db, fields) {
+  const {
+    currentCountryIndex,
+    currentCountryTag,
+    currentCountryLastProcessedRow,
+    totalSavedAllCountries,
+    progressTag,
+    progressLastProcessedRow,
+    progressTotalSaved,
+    progressCompletedFullPass,
+    lastResult,
+    lastWritten,
+    lastScannedRows,
+    lastMatchedRows,
+    lastSkipped,
+    completedCountryThisRun,
+    lastError,
+  } = fields;
 
-  await ref.set(
-    {
-      ...state,
-      lastRunAt: Date.now(),
-      sourceUrl: CSV_URL,
-      countryTag: COUNTRY_TAG,
+  const payload = {
+    currentCountryIndex,
+    currentCountryTag,
+    currentCountryLastProcessedRow,
+    totalSavedAllCountries,
+    countryProgress: {
+      [progressTag]: {
+        lastProcessedRow: progressLastProcessedRow,
+        totalSaved: progressTotalSaved,
+        completedFullPass: progressCompletedFullPass,
+      },
     },
-    { merge: true }
-  );
+    lastRunAt: Date.now(),
+    lastResult,
+    lastWritten,
+    lastScannedRows,
+    lastMatchedRows,
+    lastSkipped,
+    completedCountryThisRun,
+    sourceUrl: CSV_URL,
+  };
+
+  if (lastError) {
+    payload.lastError = lastError;
+  }
+
+  const ref = db.collection(SYNC_STATE_COLLECTION).doc(SYNC_STATE_DOC);
+  await ref.set(payload, { merge: true });
 }
 
 async function runCsvSync() {
@@ -269,20 +341,27 @@ async function runCsvSync() {
   const userAgent = requireEnv("OPEN_FOOD_FACTS_USER_AGENT");
   const maxWrites = getMaxWrites();
 
-  const initialState = await getSyncState(db);
-  const startAfterRow = initialState.lastProcessedRow || 0;
+  const rotationState = await getRotationState(db);
+  const currentCountryIndex = rotationState.currentCountryIndex;
+  const currentCountryTag = COUNTRY_ROTATION[currentCountryIndex];
 
-  console.log("Starting Open Food Facts CSV → Firestore sync");
+  const currentProgress = rotationState.countryProgress[currentCountryTag] || {};
+  const startAfterRow = Number(currentProgress.lastProcessedRow || 0);
+  const countrySavedBefore = Number(currentProgress.totalSaved || 0);
+  const totalSavedAllBefore = Number(rotationState.totalSavedAllCountries || 0);
+
+  console.log("Starting Open Food Facts CSV → Firestore country-rotation sync");
   console.log(`CSV URL: ${CSV_URL}`);
-  console.log(`Country filter: ${COUNTRY_TAG}`);
   console.log(`Collection: ${COLLECTION_NAME}`);
+  console.log(`Current country index: ${currentCountryIndex} of ${COUNTRY_ROTATION.length}`);
+  console.log(`Current country tag: ${currentCountryTag}`);
   console.log(`Start after row: ${startAfterRow}`);
   console.log(`Max writes this run: ${maxWrites}`);
   console.log(`Max rows to scan this run: ${MAX_ROWS_TO_SCAN_PER_RUN}`);
 
   let rowNumber = 0;
   let scannedThisRun = 0;
-  let matchedSingapore = 0;
+  let matched = 0;
   let written = 0;
   let skipped = 0;
   let batchesCommitted = 0;
@@ -315,20 +394,27 @@ async function runCsvSync() {
 
     batchesCommitted++;
     console.log(
-      `Committed ${label} batch #${batchesCommitted} (${committingCount} writes): row=${rowNumber}, scanned=${scannedThisRun}, singapore=${matchedSingapore}, written=${written}`
+      `Committed ${label} batch #${batchesCommitted}: country=${currentCountryTag}, writes=${committingCount}, row=${rowNumber}, scanned=${scannedThisRun}, matched=${matched}, written=${written}`
     );
 
-    // Persist the cursor after every successful commit so a crash later in
-    // the run resumes here instead of at the previous run's cursor.
+    // Persist the cursor after every successful commit so a crash later in the
+    // run resumes here instead of at the previous run's cursor.
     try {
-      await saveSyncState(db, {
-        lastProcessedRow: rowNumber,
-        totalSaved: Number(initialState.totalSaved || 0) + written,
-        completedFullPass: false,
+      await saveRotationState(db, {
+        currentCountryIndex,
+        currentCountryTag,
+        currentCountryLastProcessedRow: rowNumber,
+        totalSavedAllCountries: totalSavedAllBefore + written,
+        progressTag: currentCountryTag,
+        progressLastProcessedRow: rowNumber,
+        progressTotalSaved: countrySavedBefore + written,
+        progressCompletedFullPass: false,
         lastResult: "partial_progress",
         lastWritten: written,
-        lastMatchedSingapore: matchedSingapore,
         lastScannedRows: scannedThisRun,
+        lastMatchedRows: matched,
+        lastSkipped: skipped,
+        completedCountryThisRun: false,
       });
     } catch (error) {
       error.isPersistenceFailure = true;
@@ -384,19 +470,19 @@ async function runCsvSync() {
 
       if (scannedThisRun % HEARTBEAT_ROW_INTERVAL === 0) {
         console.log(
-          `Still scanning: row=${rowNumber}, scanned=${scannedThisRun}, singapore=${matchedSingapore}, written=${written}, skipped=${skipped}`
+          `Still scanning: country=${currentCountryTag}, row=${rowNumber}, scanned=${scannedThisRun}, matched=${matched}, written=${written}, skipped=${skipped}`
         );
       }
 
-      // Cheap substring pre-filter; rowContainsSingapore on the parsed
+      // Cheap substring pre-filter; rowMatchesCountry on the parsed
       // countries_tags column stays the authoritative check.
-      if (line.includes(COUNTRY_TAG)) {
+      if (line.includes(currentCountryTag)) {
         const row = parseRow(line, columnIndexes);
 
-        if (rowContainsSingapore(row)) {
-          matchedSingapore++;
+        if (rowMatchesCountry(row, currentCountryTag)) {
+          matched++;
 
-          const compact = compactProduct(row);
+          const compact = compactProduct(row, currentCountryTag);
 
           if (!compact) {
             skipped++;
@@ -406,7 +492,7 @@ async function runCsvSync() {
             batchCount++;
             written++;
 
-            if (batchCount >= BATCH_COMMIT_SIZE) {
+            if (batchCount >= BATCH_SIZE) {
               await commitCurrentBatch("progress");
             }
           }
@@ -449,23 +535,49 @@ async function runCsvSync() {
 
   await commitCurrentBatch("final");
 
-  const completedFullPass =
+  // A full pass only happens when the stream drained on its own without hitting
+  // either per-run limit and without a stream error.
+  const completedCountryThisRun =
     !stoppedBecauseWriteLimit && !stoppedBecauseRowLimit && streamError === null;
 
-  // Never move the cursor backward: an error during the skip-to-cursor phase
-  // would otherwise rewind progress recorded by earlier runs.
-  const nextRow = completedFullPass ? 0 : Math.max(rowNumber, startAfterRow);
+  // Never move a country's cursor backward: an error during the skip-to-cursor
+  // phase would otherwise rewind progress recorded by earlier runs.
+  const partialNextRow = Math.max(rowNumber, startAfterRow);
 
-  await saveSyncState(db, {
-    lastProcessedRow: nextRow,
-    totalSaved: Number(initialState.totalSaved || 0) + written,
-    completedFullPass,
+  let savedCountryRow;
+  let nextCountryIndex;
+
+  if (completedCountryThisRun) {
+    // Country finished: reset its cursor, mark the pass complete, and advance
+    // the top-level pointer to the next country (looping back at the end).
+    savedCountryRow = 0;
+    nextCountryIndex = (currentCountryIndex + 1) % COUNTRY_ROTATION.length;
+  } else {
+    savedCountryRow = partialNextRow;
+    nextCountryIndex = currentCountryIndex;
+  }
+
+  const nextCountryTag = COUNTRY_ROTATION[nextCountryIndex];
+  const nextCountryStartRow = completedCountryThisRun
+    ? Number((rotationState.countryProgress[nextCountryTag] || {}).lastProcessedRow || 0)
+    : savedCountryRow;
+
+  await saveRotationState(db, {
+    currentCountryIndex: nextCountryIndex,
+    currentCountryTag: nextCountryTag,
+    currentCountryLastProcessedRow: nextCountryStartRow,
+    totalSavedAllCountries: totalSavedAllBefore + written,
+    progressTag: currentCountryTag,
+    progressLastProcessedRow: savedCountryRow,
+    progressTotalSaved: countrySavedBefore + written,
+    progressCompletedFullPass: completedCountryThisRun,
     lastResult: streamError ? "stopped_or_error" : "success",
-    ...(streamError ? { lastError: streamError.message } : {}),
     lastWritten: written,
-    lastSkipped: skipped,
-    lastMatchedSingapore: matchedSingapore,
     lastScannedRows: scannedThisRun,
+    lastMatchedRows: matched,
+    lastSkipped: skipped,
+    completedCountryThisRun,
+    lastError: streamError ? streamError.message : undefined,
   });
 
   if (streamError) {
@@ -473,21 +585,25 @@ async function runCsvSync() {
   }
 
   console.log("CSV sync complete.");
-  console.log(`Last processed row saved: ${nextRow}`);
+  console.log(`Country: ${currentCountryTag}`);
+  console.log(`Last processed row saved: ${savedCountryRow}`);
   console.log(`Scanned rows this run: ${scannedThisRun}`);
-  console.log(`Singapore rows matched: ${matchedSingapore}`);
+  console.log(`Matched rows: ${matched}`);
   console.log(`Written: ${written}`);
   console.log(`Skipped: ${skipped}`);
   console.log(`Batches committed: ${batchesCommitted}`);
-  console.log(`Completed full pass: ${completedFullPass}`);
+  console.log(`Completed country full pass: ${completedCountryThisRun}`);
+  console.log(`Next country: ${nextCountryTag}`);
 }
 
 module.exports = {
+  COUNTRY_ROTATION,
+  normalizeCountryIndex,
   openUrlWithRedirects,
   normalizeText,
   buildPrefixes,
   splitTags,
-  rowContainsSingapore,
+  rowMatchesCountry,
   compactProduct,
   buildColumnIndexes,
   parseRow,
