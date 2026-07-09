@@ -2,7 +2,7 @@ const { initializeApp, cert } = require("firebase-admin/app");
 const { getFirestore } = require("firebase-admin/firestore");
 const https = require("https");
 const zlib = require("zlib");
-const csv = require("csv-parser");
+const readline = require("readline");
 
 const COLLECTION_NAME = "product_search_index";
 const SYNC_STATE_COLLECTION = "sync_state";
@@ -13,12 +13,18 @@ const CSV_URL = "https://static.openfoodfacts.org/data/en.openfoodfacts.org.prod
 const COUNTRY_TAG = "en:singapore";
 const DEFAULT_MAX_WRITES = 18000;
 
-// Safety limit so the script does not run forever in GitHub Actions.
-const MAX_ROWS_TO_SCAN_PER_RUN = 1500000;
+// Keep each GitHub Actions run short and memory-safe: stop cleanly after this
+// many scanned rows and let the saved cursor resume on the next run.
+const MAX_ROWS_TO_SCAN_PER_RUN = 250000;
 
 const BATCH_COMMIT_SIZE = 450;
-const SCAN_LOG_INTERVAL = 50000;
+const HEARTBEAT_ROW_INTERVAL = 25000;
 const CURSOR_SKIP_LOG_INTERVAL = 250000;
+
+// The Open Food Facts CSV has ~200 columns; only these are read. Positions
+// come from the header row, so upstream column reordering is harmless.
+const REQUIRED_COLUMNS = ["code", "product_name", "countries_tags"];
+const OPTIONAL_COLUMNS = ["brands", "image_front_url", "categories_tags", "last_modified_t"];
 
 function requireEnv(name) {
   const value = process.env[name];
@@ -170,6 +176,59 @@ function compactProduct(row) {
   };
 }
 
+// The OFF export is tab-separated with no quoting, so lines are split on
+// "\t" directly. csv-parser was dropped because its quote handling treated a
+// stray '"' in a field as the start of a quoted section and buffered input
+// until the next '"', which grew the heap without bound on this file.
+function buildColumnIndexes(headerLine) {
+  const bomFreeHeaderLine =
+    headerLine.charCodeAt(0) === 0xfeff ? headerLine.slice(1) : headerLine;
+
+  const headers = bomFreeHeaderLine
+    .split("\t")
+    .map((header) => header.trim());
+
+  const indexes = new Map();
+  headers.forEach((header, index) => {
+    if (!indexes.has(header)) {
+      indexes.set(header, index);
+    }
+  });
+
+  const missingRequired = REQUIRED_COLUMNS.filter((column) => !indexes.has(column));
+  if (missingRequired.length > 0) {
+    const error = new Error(`CSV header is missing required columns: ${missingRequired.join(", ")}`);
+    error.isFatalHeaderError = true;
+    throw error;
+  }
+
+  const missingOptional = OPTIONAL_COLUMNS.filter((column) => !indexes.has(column));
+  if (missingOptional.length > 0) {
+    console.log(`Warning: CSV header is missing optional columns: ${missingOptional.join(", ")}`);
+  }
+
+  return indexes;
+}
+
+function parseRow(line, columnIndexes) {
+  const fields = line.split("\t");
+
+  const field = (column) => {
+    const index = columnIndexes.get(column);
+    return index === undefined ? undefined : fields[index];
+  };
+
+  return {
+    code: field("code"),
+    product_name: field("product_name"),
+    brands: field("brands"),
+    image_front_url: field("image_front_url"),
+    countries_tags: field("countries_tags"),
+    categories_tags: field("categories_tags"),
+    last_modified_t: field("last_modified_t"),
+  };
+}
+
 async function getSyncState(db) {
   const ref = db.collection(SYNC_STATE_COLLECTION).doc(SYNC_STATE_DOC);
   const snap = await ref.get();
@@ -250,7 +309,7 @@ async function runCsvSync() {
     try {
       await committingBatch.commit();
     } catch (error) {
-      error.isFirestoreCommitFailure = true;
+      error.isPersistenceFailure = true;
       throw error;
     }
 
@@ -258,21 +317,60 @@ async function runCsvSync() {
     console.log(
       `Committed ${label} batch #${batchesCommitted} (${committingCount} writes): row=${rowNumber}, scanned=${scannedThisRun}, singapore=${matchedSingapore}, written=${written}`
     );
+
+    // Persist the cursor after every successful commit so a crash later in
+    // the run resumes here instead of at the previous run's cursor.
+    try {
+      await saveSyncState(db, {
+        lastProcessedRow: rowNumber,
+        totalSaved: Number(initialState.totalSaved || 0) + written,
+        completedFullPass: false,
+        lastResult: "partial_progress",
+        lastWritten: written,
+        lastMatchedSingapore: matchedSingapore,
+        lastScannedRows: scannedThisRun,
+      });
+    } catch (error) {
+      error.isPersistenceFailure = true;
+      throw error;
+    }
+
+    console.log(`Saved cursor after batch #${batchesCommitted}: lastProcessedRow=${rowNumber}`);
   }
 
   const response = await openUrlWithRedirects(CSV_URL, userAgent);
   const gunzip = zlib.createGunzip();
-  const rows = response.pipe(gunzip).pipe(
-    csv({
-      separator: "\t",
-      mapHeaders: ({ header }) => header.trim(),
-    })
-  );
+
+  const lines = readline.createInterface({
+    input: response.pipe(gunzip),
+    crlfDelay: Infinity,
+  });
+
+  // .pipe() does not forward errors: without this wiring a download or gzip
+  // failure would leave the line reader waiting forever. Recording the error
+  // and closing the reader lets the run finish cleanly as a partial pass.
+  let inputError = null;
+  let closingStreams = false;
+  const failInput = (error) => {
+    if (closingStreams) return;
+    if (!inputError) inputError = error;
+    lines.close();
+  };
+  response.on("error", failInput);
+  gunzip.on("error", failInput);
+
+  let columnIndexes = null;
 
   try {
-    // Rows are processed strictly one at a time: `for await` does not pull the
-    // next row until this iteration (including any batch commit) finishes.
-    for await (const row of rows) {
+    // Lines are processed strictly one at a time: `for await` does not pull
+    // the next line until this iteration (including commits) finishes, and
+    // readline pauses the download while the loop is behind.
+    for await (const line of lines) {
+      if (columnIndexes === null) {
+        columnIndexes = buildColumnIndexes(line);
+        continue;
+      }
+
       rowNumber++;
 
       if (rowNumber <= startAfterRow) {
@@ -284,61 +382,79 @@ async function runCsvSync() {
 
       scannedThisRun++;
 
-      if (scannedThisRun % SCAN_LOG_INTERVAL === 0) {
+      if (scannedThisRun % HEARTBEAT_ROW_INTERVAL === 0) {
         console.log(
-          `Progress: scanned=${scannedThisRun}, row=${rowNumber}, singapore=${matchedSingapore}, written=${written}, skipped=${skipped}`
+          `Still scanning: row=${rowNumber}, scanned=${scannedThisRun}, singapore=${matchedSingapore}, written=${written}, skipped=${skipped}`
         );
       }
 
-      if (rowContainsSingapore(row)) {
-        matchedSingapore++;
+      // Cheap substring pre-filter; rowContainsSingapore on the parsed
+      // countries_tags column stays the authoritative check.
+      if (line.includes(COUNTRY_TAG)) {
+        const row = parseRow(line, columnIndexes);
 
-        const compact = compactProduct(row);
+        if (rowContainsSingapore(row)) {
+          matchedSingapore++;
 
-        if (!compact) {
-          skipped++;
-        } else {
-          const docRef = db.collection(COLLECTION_NAME).doc(compact.barcode);
-          batch.set(docRef, compact, { merge: true });
-          batchCount++;
-          written++;
+          const compact = compactProduct(row);
 
-          if (batchCount >= BATCH_COMMIT_SIZE) {
-            await commitCurrentBatch("progress");
+          if (!compact) {
+            skipped++;
+          } else {
+            const docRef = db.collection(COLLECTION_NAME).doc(compact.barcode);
+            batch.set(docRef, compact, { merge: true });
+            batchCount++;
+            written++;
+
+            if (batchCount >= BATCH_COMMIT_SIZE) {
+              await commitCurrentBatch("progress");
+            }
           }
         }
       }
 
       if (written >= maxWrites) {
         stoppedBecauseWriteLimit = true;
+        console.log(`Stopping: reached max Firestore writes for this run (${maxWrites}) at row=${rowNumber}.`);
         break;
       }
 
       if (scannedThisRun >= MAX_ROWS_TO_SCAN_PER_RUN) {
         stoppedBecauseRowLimit = true;
+        console.log(`Stopping: reached max rows to scan for this run (${MAX_ROWS_TO_SCAN_PER_RUN}) at row=${rowNumber}.`);
         break;
       }
     }
   } catch (error) {
-    if (error && error.isFirestoreCommitFailure) {
-      // A failed commit means those writes were lost; fail the run without
-      // advancing the cursor so the rows are re-scanned next time.
+    if (error && (error.isPersistenceFailure || error.isFatalHeaderError)) {
+      // A failed commit or cursor save means progress was not durably
+      // recorded; fail the run so those rows are re-scanned next time. A bad
+      // header must also fail loudly instead of ending as a "clean" pass.
       throw error;
     }
 
     streamError = error;
   } finally {
-    // Breaking out of `for await` destroys the CSV stream; also abort the
-    // download and the gunzip stage. No-ops if the stream ended normally.
+    // Breaking out of `for await` leaves the download running; close the
+    // reader and abort both stream stages. No-ops if the stream ended.
+    closingStreams = true;
+    lines.close();
     response.destroy();
     gunzip.destroy();
+  }
+
+  if (!streamError && inputError) {
+    streamError = inputError;
   }
 
   await commitCurrentBatch("final");
 
   const completedFullPass =
     !stoppedBecauseWriteLimit && !stoppedBecauseRowLimit && streamError === null;
-  const nextRow = completedFullPass ? 0 : rowNumber;
+
+  // Never move the cursor backward: an error during the skip-to-cursor phase
+  // would otherwise rewind progress recorded by earlier runs.
+  const nextRow = completedFullPass ? 0 : Math.max(rowNumber, startAfterRow);
 
   await saveSyncState(db, {
     lastProcessedRow: nextRow,
@@ -352,14 +468,6 @@ async function runCsvSync() {
     lastScannedRows: scannedThisRun,
   });
 
-  if (stoppedBecauseWriteLimit) {
-    console.log(`Stopped early: reached max writes for this run (${maxWrites}).`);
-  }
-
-  if (stoppedBecauseRowLimit) {
-    console.log(`Stopped early: reached max rows to scan for this run (${MAX_ROWS_TO_SCAN_PER_RUN}).`);
-  }
-
   if (streamError) {
     console.log(`CSV stream stopped: ${streamError.message}`);
   }
@@ -370,10 +478,24 @@ async function runCsvSync() {
   console.log(`Singapore rows matched: ${matchedSingapore}`);
   console.log(`Written: ${written}`);
   console.log(`Skipped: ${skipped}`);
+  console.log(`Batches committed: ${batchesCommitted}`);
   console.log(`Completed full pass: ${completedFullPass}`);
 }
 
-runCsvSync().catch((error) => {
-  console.error("CSV sync failed:", error);
-  process.exit(1);
-});
+module.exports = {
+  openUrlWithRedirects,
+  normalizeText,
+  buildPrefixes,
+  splitTags,
+  rowContainsSingapore,
+  compactProduct,
+  buildColumnIndexes,
+  parseRow,
+};
+
+if (require.main === module) {
+  runCsvSync().catch((error) => {
+    console.error("CSV sync failed:", error);
+    process.exit(1);
+  });
+}
