@@ -3,6 +3,7 @@ package com.sephylon.foodfitscan.ui.home
 import com.sephylon.foodfitscan.domain.model.NutritionDisplayOption
 import com.sephylon.foodfitscan.domain.model.ProductSearchItem
 import com.sephylon.foodfitscan.domain.model.ProductSearchResult
+import com.sephylon.foodfitscan.domain.model.SearchCountry
 import com.sephylon.foodfitscan.domain.model.UserFoodPreferences
 import com.sephylon.foodfitscan.domain.repository.PreferenceRepository
 import com.sephylon.foodfitscan.domain.repository.ProductSearchRepository
@@ -40,7 +41,8 @@ class HomeViewModelTest {
     private fun viewModel(
         preferenceRepository: PreferenceRepository = FakePreferenceRepository(),
         searchRepository: ProductSearchRepository = FakeProductSearchRepository(),
-    ) = HomeViewModel(preferenceRepository, searchRepository)
+        deviceRegionCode: String? = null,
+    ) = HomeViewModel(preferenceRepository, searchRepository, deviceRegionCode)
 
     // ── Preferences helper card ─────────────────────────────────────────────────
 
@@ -161,6 +163,18 @@ class HomeViewModelTest {
     }
 
     @Test
+    fun `product name search passes the selected country to the repository`() =
+        runTest(testDispatcher) {
+            val search = FakeProductSearchRepository()
+            val vm = viewModel(searchRepository = search, deviceRegionCode = "MY")
+
+            vm.onSearchQueryChange("nutella")
+            vm.onSearchSubmit()
+
+            assertEquals(SearchCountry.MALAYSIA, search.countries.last())
+        }
+
+    @Test
     fun `product name search does not run while typing`() = runTest(testDispatcher) {
         val search = FakeProductSearchRepository()
         val vm = viewModel(searchRepository = search)
@@ -220,6 +234,109 @@ class HomeViewModelTest {
 
         assertEquals("nutella", vm.searchQuery.value)
     }
+
+    @Test
+    fun `editing the query stops a later retry from re-running the stale search`() =
+        runTest(testDispatcher) {
+            val search = FakeProductSearchRepository(result = ProductSearchResult.NetworkError("offline"))
+            val vm = viewModel(searchRepository = search)
+
+            vm.onSearchQueryChange("nutella")
+            vm.onSearchSubmit()
+            vm.onSearchQueryChange("kitkat")
+            vm.retryLastSearch()
+
+            assertEquals(1, search.callCount)
+        }
+
+    // ── Country filter ──────────────────────────────────────────────────────────
+
+    @Test
+    fun `device region SG defaults the filter to Singapore`() = runTest(testDispatcher) {
+        val vm = viewModel(deviceRegionCode = "SG")
+
+        assertEquals(SearchCountry.SINGAPORE, vm.selectedCountry.value)
+    }
+
+    @Test
+    fun `unsupported device region defaults the filter to All`() = runTest(testDispatcher) {
+        assertEquals(SearchCountry.ALL, viewModel(deviceRegionCode = "BR").selectedCountry.value)
+        assertEquals(SearchCountry.ALL, viewModel(deviceRegionCode = null).selectedCountry.value)
+    }
+
+    @Test
+    fun `a persisted country overrides the device region default`() = runTest(testDispatcher) {
+        val prefs = FakePreferenceRepository(searchCountry = SearchCountry.JAPAN)
+
+        val vm = viewModel(preferenceRepository = prefs, deviceRegionCode = "SG")
+
+        assertEquals(SearchCountry.JAPAN, vm.selectedCountry.value)
+    }
+
+    @Test
+    fun `selecting a country persists it`() = runTest(testDispatcher) {
+        val prefs = FakePreferenceRepository()
+        val vm = viewModel(preferenceRepository = prefs)
+
+        vm.onCountrySelected(SearchCountry.THAILAND)
+
+        assertEquals(SearchCountry.THAILAND, vm.selectedCountry.value)
+        assertEquals(SearchCountry.THAILAND, prefs.observeSearchCountry().first())
+    }
+
+    @Test
+    fun `selecting a country re-runs the displayed search with the new filter`() =
+        runTest(testDispatcher) {
+            val search = FakeProductSearchRepository()
+            val vm = viewModel(searchRepository = search, deviceRegionCode = "SG")
+
+            vm.onSearchQueryChange("nutella")
+            vm.onSearchSubmit()
+            vm.onCountrySelected(SearchCountry.ALL)
+
+            assertEquals(2, search.callCount)
+            assertEquals(listOf("nutella", "nutella"), search.queries)
+            assertEquals(listOf(SearchCountry.SINGAPORE, SearchCountry.ALL), search.countries)
+        }
+
+    @Test
+    fun `selecting a country does not search when no results are showing`() =
+        runTest(testDispatcher) {
+            val search = FakeProductSearchRepository()
+            val vm = viewModel(searchRepository = search)
+
+            vm.onCountrySelected(SearchCountry.INDIA)
+
+            assertEquals(0, search.callCount)
+        }
+
+    @Test
+    fun `re-selecting the current country is a no-op`() = runTest(testDispatcher) {
+        val search = FakeProductSearchRepository()
+        val vm = viewModel(searchRepository = search, deviceRegionCode = "SG")
+
+        vm.onSearchQueryChange("nutella")
+        vm.onSearchSubmit()
+        vm.onCountrySelected(SearchCountry.SINGAPORE)
+
+        assertEquals(1, search.callCount)
+    }
+
+    @Test
+    fun `barcode search is unaffected by the country filter`() = runTest(testDispatcher) {
+        val search = FakeProductSearchRepository()
+        val vm = viewModel(searchRepository = search, deviceRegionCode = "SG")
+
+        vm.onSearchQueryChange("5449000000996")
+        val action = vm.onSearchSubmit()
+
+        assertEquals(HomeSearchAction.NavigateToProduct("5449000000996"), action)
+        assertEquals(0, search.callCount)
+
+        // Changing the country afterwards must not turn the barcode into a name search.
+        vm.onCountrySelected(SearchCountry.ALL)
+        assertEquals(0, search.callCount)
+    }
 }
 
 private class FakeProductSearchRepository(
@@ -227,19 +344,23 @@ private class FakeProductSearchRepository(
 ) : ProductSearchRepository {
     var callCount = 0
     val queries = mutableListOf<String>()
+    val countries = mutableListOf<SearchCountry>()
 
-    override suspend fun searchByName(rawQuery: String): ProductSearchResult {
+    override suspend fun searchByName(rawQuery: String, country: SearchCountry): ProductSearchResult {
         callCount++
         queries.add(rawQuery)
+        countries.add(country)
         return result
     }
 }
 
 private class FakePreferenceRepository(
     initial: UserFoodPreferences = UserFoodPreferences(),
+    searchCountry: SearchCountry? = null,
     private val prefs: MutableStateFlow<UserFoodPreferences> = MutableStateFlow(initial),
 ) : PreferenceRepository {
     private val _nutritionFields = MutableStateFlow(NutritionDisplayOption.DEFAULT_KEYS)
+    private val _searchCountry = MutableStateFlow(searchCountry)
     override fun getUserPreferences(): Flow<UserFoodPreferences> = prefs
     override suspend fun saveUserPreferences(preferences: UserFoodPreferences) {
         prefs.value = preferences
@@ -249,5 +370,9 @@ private class FakePreferenceRepository(
     override fun observeSelectedNutritionFields(): Flow<Set<String>> = _nutritionFields
     override suspend fun saveSelectedNutritionFields(fields: Set<String>) {
         _nutritionFields.value = fields.ifEmpty { NutritionDisplayOption.DEFAULT_KEYS }
+    }
+    override fun observeSearchCountry(): Flow<SearchCountry?> = _searchCountry
+    override suspend fun saveSearchCountry(country: SearchCountry) {
+        _searchCountry.value = country
     }
 }

@@ -1,5 +1,6 @@
 package com.sephylon.foodfitscan.domain.repository
 
+import com.sephylon.foodfitscan.domain.model.SearchCountry
 import com.sephylon.foodfitscan.domain.model.UserFoodPreferences
 import kotlinx.coroutines.flow.Flow
 
@@ -16,4 +17,12 @@ interface PreferenceRepository {
      */
     fun observeSelectedNutritionFields(): Flow<Set<String>>
     suspend fun saveSelectedNutritionFields(fields: Set<String>)
+
+    /**
+     * The country filter the user picked for product-name search, or null when they have
+     * never picked one — callers then fall back to the device region. Also emits null when
+     * a previously stored country is no longer supported.
+     */
+    fun observeSearchCountry(): Flow<SearchCountry?>
+    suspend fun saveSearchCountry(country: SearchCountry)
 }

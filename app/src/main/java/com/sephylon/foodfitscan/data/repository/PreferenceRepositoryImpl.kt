@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import com.sephylon.foodfitscan.data.preferences.PreferenceKeys
 import com.sephylon.foodfitscan.domain.model.NutritionDisplayOption
+import com.sephylon.foodfitscan.domain.model.SearchCountry
 import com.sephylon.foodfitscan.domain.model.UserFoodPreferences
 import com.sephylon.foodfitscan.domain.repository.PreferenceRepository
 import kotlinx.coroutines.flow.Flow
@@ -71,6 +72,17 @@ class PreferenceRepositoryImpl(
             } else {
                 prefs[PreferenceKeys.SELECTED_NUTRITION_FIELDS] = fields
             }
+        }
+    }
+
+    override fun observeSearchCountry(): Flow<SearchCountry?> =
+        dataStore.data
+            .catch { emit(emptyPreferences()) }
+            .map { SearchCountry.fromKey(it[PreferenceKeys.SEARCH_COUNTRY]) }
+
+    override suspend fun saveSearchCountry(country: SearchCountry) {
+        dataStore.edit { prefs ->
+            prefs[PreferenceKeys.SEARCH_COUNTRY] = country.key
         }
     }
 

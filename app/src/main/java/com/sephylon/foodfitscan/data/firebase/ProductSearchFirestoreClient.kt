@@ -60,6 +60,9 @@ internal class FirestoreProductSearchClient(
                 imageUrl = doc.getString(FIELD_IMAGE_URL),
                 searchName = doc.getString(FIELD_SEARCH_NAME),
                 categoriesCount = (doc.get(FIELD_CATEGORIES_TAGS) as? List<*>)?.size ?: 0,
+                countryTags = (doc.get(FIELD_COUNTRY_TAGS) as? List<*>)
+                    ?.filterIsInstance<String>()
+                    .orEmpty(),
             )
         }
     }
@@ -73,6 +76,7 @@ internal class FirestoreProductSearchClient(
         private const val FIELD_IMAGE_URL = "imageUrl"
         private const val FIELD_SEARCH_NAME = "searchName"
         private const val FIELD_CATEGORIES_TAGS = "categoriesTags"
+        private const val FIELD_COUNTRY_TAGS = "countryTags"
     }
 }
 

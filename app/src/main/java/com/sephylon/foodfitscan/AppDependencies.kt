@@ -2,7 +2,11 @@ package com.sephylon.foodfitscan
 
 import android.content.Context
 import com.google.gson.Gson
+import com.sephylon.foodfitscan.ads.AdConfig
+import com.sephylon.foodfitscan.ads.InterstitialAdManager
 import com.sephylon.foodfitscan.core.network.OpenFoodFactsClient
+import com.sephylon.foodfitscan.data.device.DeviceRegionProvider
+import com.sephylon.foodfitscan.data.device.LocaleDeviceRegionProvider
 import com.sephylon.foodfitscan.data.local.CachedProductDao
 import com.sephylon.foodfitscan.data.local.FoodFitDatabase
 import com.sephylon.foodfitscan.data.local.ScanHistoryDao
@@ -60,5 +64,17 @@ internal object AppDependencies {
 
     val productSearchRepository: ProductSearchRepository by lazy {
         ProductSearchRepositoryImpl(client = FirestoreProductSearchClient())
+    }
+
+    val deviceRegionProvider: DeviceRegionProvider by lazy {
+        LocaleDeviceRegionProvider(appContext)
+    }
+
+    val interstitialAdManager: InterstitialAdManager by lazy {
+        InterstitialAdManager(
+            context = appContext,
+            adUnitId = AdConfig.interstitialAdUnitId,
+            dataStore = appContext.foodPreferenceDataStore,
+        )
     }
 }

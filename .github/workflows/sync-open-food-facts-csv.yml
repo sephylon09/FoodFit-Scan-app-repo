@@ -3,14 +3,23 @@ name: Sync Open Food Facts CSV to Firestore
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: "Sync mode"
+        required: false
+        default: "normal"
+        type: choice
+        options:
+          - normal
+          - reset-singapore
+          - image-backfill
+      confirm_reset:
+        description: "Type RESET to confirm Firestore deletion"
+        required: false
+        default: ""
       chunks:
         description: "Number of CSV chunks to process"
         required: false
         default: "1"
-      reset_cursors:
-        description: "Reset country cursors first so rows are re-passed (image backfill). Does not delete documents."
-        required: false
-        default: "false"
   push:
     paths:
       - ".github/workflows/sync-open-food-facts-csv.yml"
@@ -21,7 +30,8 @@ on:
   # schedule:
   #   - cron: "*/10 * * * *"
 
-# A slow run must not overlap another trigger and double-write.
+# A slow run must not overlap another trigger and double-write. reset-singapore shares this
+# group, so a reset can never run alongside an import.
 concurrency:
   group: sync-off-csv
   cancel-in-progress: false
@@ -42,11 +52,28 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Fails the run before any Firestore credential is loaded when reset-singapore was
+      # selected without the exact confirmation string. Nothing is deleted.
+      - name: Guard destructive reset
+        if: ${{ github.event.inputs.mode == 'reset-singapore' }}
+        env:
+          CONFIRM_RESET: ${{ github.event.inputs.confirm_reset }}
+        run: |
+          if [ "$CONFIRM_RESET" != "RESET" ]; then
+            echo "::error::mode=reset-singapore requires confirm_reset to be exactly 'RESET'. Nothing was deleted."
+            exit 1
+          fi
+          echo "Reset confirmed. product_search_index will be deleted and the cursor reset to en:singapore row 0."
+
+      # mode=normal          → country-rotation import (unchanged), now importing imageUrl.
+      # mode=reset-singapore → delete product_search_index, reset cursors, import nothing.
+      # mode=image-backfill  → merge imageUrl into existing docs via its own cursor doc.
       - name: Sync Open Food Facts CSV products to Firestore
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           MAX_FIRESTORE_WRITES_PER_RUN: ${{ secrets.MAX_FIRESTORE_WRITES_PER_RUN }}
           OPEN_FOOD_FACTS_USER_AGENT: ${{ secrets.OPEN_FOOD_FACTS_USER_AGENT }}
+          CSV_SYNC_MODE: ${{ github.event.inputs.mode || 'normal' }}
+          CSV_SYNC_CONFIRM_RESET: ${{ github.event.inputs.confirm_reset }}
           CSV_SYNC_CHUNKS_PER_RUN: ${{ github.event.inputs.chunks || '1' }}
-          CSV_SYNC_RESET_CURSORS: ${{ github.event.inputs.reset_cursors || 'false' }}
         run: npm run sync:off-csv

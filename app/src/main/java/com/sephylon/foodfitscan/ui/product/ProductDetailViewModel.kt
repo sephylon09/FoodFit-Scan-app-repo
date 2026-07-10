@@ -42,6 +42,8 @@ class ProductDetailViewModel(
     private val productRepository: ProductRepository,
     private val preferenceRepository: PreferenceRepository,
     private val scorer: SuitabilityScorer = SuitabilityScorer(),
+    /** Notified once per screen when a product loads successfully (feeds the interstitial cap). */
+    private val onProductViewed: () -> Unit = {},
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow<ProductDetailUiState>(ProductDetailUiState.Loading)
@@ -52,6 +54,7 @@ class ProductDetailViewModel(
 
     private var loadJob: Job? = null
     private var alternativesJob: Job? = null
+    private var productViewRecorded = false
 
     init {
         loadProduct()
@@ -78,6 +81,10 @@ class ProductDetailViewModel(
             _uiState.value = ProductDetailUiState.Loading
             when (val result = productRepository.getProduct(barcode)) {
                 is ProductLookupResult.Found -> {
+                    if (!productViewRecorded) {
+                        productViewRecorded = true
+                        onProductViewed()
+                    }
                     // Observe preferences and nutrition display fields so the screen updates
                     // live when the user changes settings. Suitability scoring uses only the
                     // food preferences; the selected nutrition fields are display-only.
@@ -109,12 +116,16 @@ class ProductDetailViewModel(
             barcode: String,
             productRepository: ProductRepository = AppDependencies.productRepository,
             preferenceRepository: PreferenceRepository = AppDependencies.preferenceRepository,
+            onProductViewed: () -> Unit = {
+                AppDependencies.interstitialAdManager.recordProductDetailView()
+            },
         ): ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 ProductDetailViewModel(
                     barcode = barcode,
                     productRepository = productRepository,
                     preferenceRepository = preferenceRepository,
+                    onProductViewed = onProductViewed,
                 )
             }
         }

@@ -4,12 +4,14 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.Preferences
 import com.sephylon.foodfitscan.domain.model.NutritionDisplayOption
+import com.sephylon.foodfitscan.domain.model.SearchCountry
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -17,8 +19,8 @@ import org.junit.rules.TemporaryFolder
 import java.io.File
 
 /**
- * Verifies the real [PreferenceRepositoryImpl] nutrition-display behaviour against a
- * temporary file-backed DataStore (no Android runtime, no internet).
+ * Verifies the real [PreferenceRepositoryImpl] nutrition-display and search-country
+ * behaviour against a temporary file-backed DataStore (no Android runtime, no internet).
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class PreferenceRepositoryImplTest {
@@ -71,5 +73,27 @@ class PreferenceRepositoryImplTest {
         val prefs = repository.getUserPreferences().first()
         assertEquals(emptySet<String>(), prefs.allergensToAvoid)
         assertEquals(false, prefs.avoidUltraProcessed)
+    }
+
+    // ── Search country ──────────────────────────────────────────────────────
+
+    @Test
+    fun `search country is null until the user picks one`() = testScope.runTest {
+        assertNull(repository.observeSearchCountry().first())
+    }
+
+    @Test
+    fun `saved search country persists and is read back`() = testScope.runTest {
+        repository.saveSearchCountry(SearchCountry.SOUTH_KOREA)
+
+        assertEquals(SearchCountry.SOUTH_KOREA, repository.observeSearchCountry().first())
+    }
+
+    @Test
+    fun `saving All persists as an explicit choice rather than as no choice`() = testScope.runTest {
+        repository.saveSearchCountry(SearchCountry.JAPAN)
+        repository.saveSearchCountry(SearchCountry.ALL)
+
+        assertEquals(SearchCountry.ALL, repository.observeSearchCountry().first())
     }
 }

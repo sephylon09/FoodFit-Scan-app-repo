@@ -28,7 +28,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Public
-import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.outlined.Circle
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
@@ -51,6 +50,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.sephylon.foodfitscan.domain.model.AllergenOption
 import com.sephylon.foodfitscan.domain.model.NutritionDisplayOption
+import com.sephylon.foodfitscan.ui.components.AppLogo
 import com.sephylon.foodfitscan.ui.components.ChipOption
 import com.sephylon.foodfitscan.ui.components.SelectionChipGroup
 import com.sephylon.foodfitscan.ui.theme.GreenAccentLight
@@ -208,7 +208,7 @@ private fun IntroPage() {
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Spacer(Modifier.height(48.dp))
-        BrandMark(icon = Icons.Default.QrCodeScanner)
+        AppLogo(size = 108.dp)
         Spacer(Modifier.height(28.dp))
         Text(
             text = "FoodFit Scan",
@@ -226,6 +226,7 @@ private fun IntroPage() {
     }
 }
 
+/** Gradient tile used by the Open Food Facts credit page — not the app's own brand mark. */
 @Composable
 private fun BrandMark(icon: ImageVector) {
     Box(

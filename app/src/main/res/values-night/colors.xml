@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Native ad card colors matching the Compose dark color scheme -->
+    <color name="native_ad_surface">#FF191D1B</color>
+    <color name="native_ad_outline">#FF404844</color>
+    <color name="native_ad_text_primary">#FFE1E4E0</color>
+    <color name="native_ad_text_secondary">#FFC0C9C2</color>
+    <color name="native_ad_badge_bg">#FF156136</color>
+    <color name="native_ad_badge_text">#FFD9F2E1</color>
+    <color name="native_ad_cta_bg">#FF8FD9AC</color>
+    <color name="native_ad_cta_text">#FF0C4526</color>
+    <color name="native_ad_media_bg">#FF272B29</color>
+</resources>

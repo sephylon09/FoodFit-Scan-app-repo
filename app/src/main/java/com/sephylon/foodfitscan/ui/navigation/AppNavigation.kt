@@ -1,20 +1,24 @@
 package com.sephylon.foodfitscan.ui.navigation
 
+import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.sephylon.foodfitscan.AppDependencies
 import com.sephylon.foodfitscan.AppViewModel
 import com.sephylon.foodfitscan.ui.about.AboutScreen
 import com.sephylon.foodfitscan.ui.history.HistoryScreen
@@ -38,6 +42,26 @@ fun AppNavigation(appViewModel: AppViewModel = viewModel(factory = AppViewModel.
     // Lock the start destination so NavHost is not recreated if the DataStore later emits again.
     val startDest = remember { resolvedStartDest!! }
     val navController = rememberNavController()
+
+    // Interstitial trigger: ONLY when the user navigates back to Home from a product detail
+    // screen (never on launch, scanner open, after a scan, or before product details). The
+    // manager's frequency gate decides whether an ad actually shows.
+    val activity = LocalActivity.current
+    DisposableEffect(navController, activity) {
+        var previousRoute: String? = null
+        val listener = NavController.OnDestinationChangedListener { _, destination, _ ->
+            val newRoute = destination.route
+            if (newRoute == Screen.Home.route &&
+                previousRoute == Screen.ProductDetail.route &&
+                activity != null
+            ) {
+                AppDependencies.interstitialAdManager.maybeShowOnReturnToHome(activity)
+            }
+            previousRoute = newRoute
+        }
+        navController.addOnDestinationChangedListener(listener)
+        onDispose { navController.removeOnDestinationChangedListener(listener) }
+    }
 
     NavHost(
         navController = navController,

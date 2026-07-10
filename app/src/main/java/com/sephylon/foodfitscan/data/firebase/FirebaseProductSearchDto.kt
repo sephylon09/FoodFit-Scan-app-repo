@@ -15,4 +15,6 @@ data class FirebaseProductSearchDto(
     val searchName: String? = null,
     /** Size of the doc's `categoriesTags` array; used only as a display-quality signal. */
     val categoriesCount: Int = 0,
+    /** Open Food Facts country tags (e.g. `en:singapore`), used for app-side filtering. */
+    val countryTags: List<String> = emptyList(),
 )

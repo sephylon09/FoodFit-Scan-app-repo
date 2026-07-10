@@ -18,7 +18,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.outlined.FactCheck
 import androidx.compose.material.icons.outlined.HealthAndSafety
 import androidx.compose.material.icons.outlined.Lock
@@ -35,12 +34,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.sephylon.foodfitscan.BuildConfig
+import com.sephylon.foodfitscan.ui.components.AppLogo
 import com.sephylon.foodfitscan.ui.theme.FoodFitScanTheme
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -69,27 +68,7 @@ fun AboutScreen(onBack: () -> Unit) {
             Spacer(Modifier.height(24.dp))
 
             // ── Hero ────────────────────────────────────────────────────────
-            Box(
-                modifier = Modifier
-                    .size(88.dp)
-                    .clip(RoundedCornerShape(28.dp))
-                    .background(
-                        Brush.linearGradient(
-                            listOf(
-                                MaterialTheme.colorScheme.primaryContainer,
-                                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
-                            ),
-                        ),
-                    ),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = Icons.Default.QrCodeScanner,
-                    contentDescription = null,
-                    modifier = Modifier.size(44.dp),
-                    tint = MaterialTheme.colorScheme.primary,
-                )
-            }
+            AppLogo(size = 96.dp)
 
             Spacer(Modifier.height(16.dp))
 

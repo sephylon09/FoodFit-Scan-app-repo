@@ -3,6 +3,7 @@ package com.sephylon.foodfitscan.data.repository
 import com.sephylon.foodfitscan.data.firebase.FirebaseProductSearchDto
 import com.sephylon.foodfitscan.data.firebase.ProductSearchFirestoreClient
 import com.sephylon.foodfitscan.domain.model.ProductSearchResult
+import com.sephylon.foodfitscan.domain.model.SearchCountry
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -237,6 +238,127 @@ class ProductSearchRepositoryImplTest {
 
         assertEquals(40, client.lastLimit)
     }
+
+    // ── Country filtering ───────────────────────────────────────────────────
+
+    @Test
+    fun `a selected country keeps only results carrying its country tag`() = runTest {
+        val client = FakeClient(result = listOf(sgProduct, jpProduct, sgAndMyProduct))
+        val repo = ProductSearchRepositoryImpl(client)
+
+        val items = (repo.searchByName("milk", SearchCountry.SINGAPORE) as ProductSearchResult.Success).items
+
+        assertEquals(listOf("sg", "sg-my"), items.map { it.barcode }.sorted())
+    }
+
+    @Test
+    fun `All does not filter by country`() = runTest {
+        val client = FakeClient(result = listOf(sgProduct, jpProduct, sgAndMyProduct))
+        val repo = ProductSearchRepositoryImpl(client)
+
+        val items = (repo.searchByName("milk", SearchCountry.ALL) as ProductSearchResult.Success).items
+
+        assertEquals(3, items.size)
+    }
+
+    @Test
+    fun `country defaults to All when the caller omits it`() = runTest {
+        val client = FakeClient(result = listOf(sgProduct, jpProduct))
+        val repo = ProductSearchRepositoryImpl(client)
+
+        val items = (repo.searchByName("milk") as ProductSearchResult.Success).items
+
+        assertEquals(2, items.size)
+    }
+
+    @Test
+    fun `a selected country hides documents with no country tags`() = runTest {
+        val untagged = FirebaseProductSearchDto(
+            barcode = "none",
+            name = "Milk Drink",
+            brand = "Acme",
+            searchName = "milk drink acme",
+        )
+        val client = FakeClient(result = listOf(untagged))
+        val repo = ProductSearchRepositoryImpl(client)
+
+        assertEquals(ProductSearchResult.Empty, repo.searchByName("milk", SearchCountry.JAPAN))
+    }
+
+    @Test
+    fun `filtering out every result for a country returns Empty`() = runTest {
+        val client = FakeClient(result = listOf(sgProduct))
+        val repo = ProductSearchRepositoryImpl(client)
+
+        assertEquals(ProductSearchResult.Empty, repo.searchByName("milk", SearchCountry.ITALY))
+    }
+
+    @Test
+    fun `ranking still applies within a country-filtered result set`() = runTest {
+        val tags = listOf("en:japan")
+        val brandOnly = FirebaseProductSearchDto(
+            barcode = "1",
+            name = "Milk Tea",
+            brand = "Kirin",
+            searchName = "milk tea kirin",
+            countryTags = tags,
+        )
+        val withImage = FirebaseProductSearchDto(
+            barcode = "2",
+            name = "Milk Tea Original Bottle",
+            brand = "Kirin",
+            imageUrl = "https://img/2.jpg",
+            searchName = "milk tea original bottle kirin",
+            countryTags = tags,
+        )
+        val categoriesOnly = FirebaseProductSearchDto(
+            barcode = "3",
+            name = "Milk Pudding",
+            searchName = "milk pudding",
+            categoriesCount = 2,
+            countryTags = tags,
+        )
+        val client = FakeClient(result = listOf(brandOnly, withImage, categoriesOnly))
+        val repo = ProductSearchRepositoryImpl(client)
+
+        val items = (repo.searchByName("milk", SearchCountry.JAPAN) as ProductSearchResult.Success).items
+
+        assertEquals(listOf("2", "1", "3"), items.map { it.barcode })
+    }
+
+    @Test
+    fun `country searches request a larger candidate pool than unfiltered ones`() = runTest {
+        val client = FakeClient(result = emptyList())
+        val repo = ProductSearchRepositoryImpl(client)
+
+        repo.searchByName("nutella", SearchCountry.SINGAPORE)
+
+        assertEquals(100, client.lastLimit)
+    }
+
+    private val sgProduct = FirebaseProductSearchDto(
+        barcode = "sg",
+        name = "Milk Powder",
+        brand = "Acme",
+        searchName = "milk powder acme",
+        countryTags = listOf("en:singapore"),
+    )
+
+    private val jpProduct = FirebaseProductSearchDto(
+        barcode = "jp",
+        name = "Milk Coffee",
+        brand = "Acme",
+        searchName = "milk coffee acme",
+        countryTags = listOf("en:japan"),
+    )
+
+    private val sgAndMyProduct = FirebaseProductSearchDto(
+        barcode = "sg-my",
+        name = "Milk Biscuits",
+        brand = "Acme",
+        searchName = "milk biscuits acme",
+        countryTags = listOf("en:malaysia", "en:singapore"),
+    )
 
     private class FakeClient(
         private val result: List<FirebaseProductSearchDto> = emptyList(),

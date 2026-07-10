@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">FoodFit Scan</string>
+    <string name="native_ad_badge">Sponsored</string>
 </resources>

@@ -144,8 +144,11 @@ fun ProductDetailScreen(
             targetState = uiState::class,
             animationSpec = tween(durationMillis = 220),
             label = "productDetailState",
-        ) { _ ->
-            when (val state = uiState) {
+        ) { stateClass ->
+            // Render the live uiState only while it still matches the crossfaded type, so the
+            // brief fade-out of a replaced state never shows the new state's content.
+            val state = uiState.takeIf { it::class == stateClass } ?: return@Crossfade
+            when (state) {
                 is ProductDetailUiState.Loading ->
                     LoadingContent(modifier = Modifier.padding(innerPadding))
                 is ProductDetailUiState.ProductFound ->

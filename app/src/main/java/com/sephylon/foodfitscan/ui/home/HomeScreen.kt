@@ -19,9 +19,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -35,11 +37,15 @@ import androidx.compose.material.icons.outlined.Fastfood
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.rounded.ArrowDropDown
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.SearchOff
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -50,29 +56,41 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
+import com.sephylon.foodfitscan.ads.AdConfig
+import com.sephylon.foodfitscan.ads.AdaptiveBannerAd
+import com.sephylon.foodfitscan.ads.NativeAdCard
+import com.sephylon.foodfitscan.ads.NativeAdSlotState
+import com.sephylon.foodfitscan.ads.SearchAdPlacement
+import com.sephylon.foodfitscan.ads.SearchRow
+import com.sephylon.foodfitscan.ads.rememberNativeAdLoader
 import com.sephylon.foodfitscan.domain.model.ProductSearchItem
 import com.sephylon.foodfitscan.domain.model.ProductSearchResult
+import com.sephylon.foodfitscan.domain.model.SearchCountry
+import com.sephylon.foodfitscan.ui.components.AppLogo
 import com.sephylon.foodfitscan.ui.theme.FoodFitScanTheme
-import com.sephylon.foodfitscan.ui.theme.GreenAccentLight
 
 @Composable
 fun HomeScreen(
@@ -85,6 +103,7 @@ fun HomeScreen(
     val query by viewModel.searchQuery.collectAsStateWithLifecycle()
     val searchState by viewModel.searchState.collectAsStateWithLifecycle()
     val showPreferencesCard by viewModel.showPreferencesCard.collectAsStateWithLifecycle()
+    val selectedCountry by viewModel.selectedCountry.collectAsStateWithLifecycle()
     val keyboardController = LocalSoftwareKeyboardController.current
 
     val submitSearch: () -> Unit = {
@@ -97,6 +116,14 @@ fun HomeScreen(
 
     Scaffold(
         floatingActionButton = { SettingsFab(onClick = onSettingsClick) },
+        // Anchored adaptive banner at the very bottom, well away from the search bar at the
+        // top. It renders with zero height until an ad loads, and hides itself on failure.
+        bottomBar = {
+            AdaptiveBannerAd(
+                adUnitId = AdConfig.bannerAdUnitId,
+                modifier = Modifier.navigationBarsPadding(),
+            )
+        },
     ) { innerPadding ->
         Column(
             modifier = Modifier
@@ -105,9 +132,13 @@ fun HomeScreen(
                 .padding(horizontal = 20.dp)
                 .imePadding(),
         ) {
-            // ── Top: small logo/app identity + About shortcut ──────────────────
+            // ── Top: logo/app identity, then country filter + About shortcut ───
             Spacer(Modifier.height(16.dp))
-            BrandHeader(onAboutClick = onAboutClick)
+            BrandHeader(
+                selectedCountry = selectedCountry,
+                onCountrySelect = viewModel::onCountrySelected,
+                onAboutClick = onAboutClick,
+            )
 
             Spacer(Modifier.height(18.dp))
 
@@ -129,6 +160,8 @@ fun HomeScreen(
                     modifier = Modifier.padding(horizontal = 8.dp),
                 )
             }
+
+            Spacer(Modifier.height(4.dp))
 
             // ── Main content area: intro, loading, results, empty, or error ────
             Box(
@@ -152,7 +185,7 @@ fun HomeScreen(
                             StatusMessage(
                                 icon = Icons.Rounded.SearchOff,
                                 title = "No results found",
-                                message = emptyResultMessage(query),
+                                message = emptyResultMessage(query, selectedCountry),
                             )
 
                         is ProductSearchResult.NetworkError,
@@ -178,67 +211,142 @@ fun HomeScreen(
     }
 }
 
-private fun emptyResultMessage(query: String): String {
+private fun emptyResultMessage(query: String, country: SearchCountry): String {
     val shown = query.trim()
-    return if (shown.isEmpty()) {
+    val hint = if (country == SearchCountry.ALL) {
         "Try another name, or scan the barcode instead."
     } else {
-        "We couldn't find “$shown”. Try another name, or scan the barcode instead."
+        "Try another name, switch the country to All, or scan the barcode instead."
     }
+    if (shown.isEmpty()) return hint
+
+    val scope = if (country == SearchCountry.ALL) "" else " in ${country.displayName}"
+    return "We couldn't find “$shown”$scope. $hint"
 }
 
 // ── Brand header ────────────────────────────────────────────────────────────
 
+/**
+ * Logo and app name on the left; the country filter and the About shortcut on the right,
+ * in that order — the info icon always stays on the far edge.
+ *
+ * The app name gives up space before the country pill does, so a long country label
+ * ("United Kingdom") shortens "FoodFit Scan" rather than pushing the info icon off-screen.
+ */
 @Composable
-private fun BrandHeader(onAboutClick: () -> Unit) {
+private fun BrandHeader(
+    selectedCountry: SearchCountry,
+    onCountrySelect: (SearchCountry) -> Unit,
+    onAboutClick: () -> Unit,
+) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            BrandMark(size = 30.dp, iconSize = 17.dp, cornerRadius = 9.dp)
+        Row(
+            modifier = Modifier.weight(1f),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            AppLogo(size = 32.dp)
             Spacer(Modifier.width(10.dp))
             Text(
                 text = "FoodFit Scan",
                 style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
-        IconButton(onClick = onAboutClick) {
-            Icon(
-                imageVector = Icons.Outlined.Info,
-                contentDescription = "About FoodFit Scan",
-                modifier = Modifier.size(22.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+
+        Spacer(Modifier.width(8.dp))
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            CountryFilter(selected = selectedCountry, onSelect = onCountrySelect)
+            IconButton(onClick = onAboutClick) {
+                Icon(
+                    imageVector = Icons.Outlined.Info,
+                    contentDescription = "About FoodFit Scan",
+                    modifier = Modifier.size(22.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }
 
-/** Small gradient app mark used in the header; the intro hero reuses the same shape language. */
+// ── Country filter ──────────────────────────────────────────────────────────
+
+/**
+ * Compact, borderless country pill that scopes product-name search results. It lives in the
+ * header beside the info icon, so the label stays short ("Singapore", "All"). The starting
+ * value comes from the device locale's region (see [HomeViewModel]); picking a country here
+ * refreshes any results already on screen.
+ */
 @Composable
-private fun BrandMark(
-    size: Dp,
-    iconSize: Dp,
-    cornerRadius: Dp,
+private fun CountryFilter(
+    selected: SearchCountry,
+    onSelect: (SearchCountry) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    Box(
-        modifier = Modifier
-            .size(size)
-            .clip(RoundedCornerShape(cornerRadius))
-            .background(
-                Brush.linearGradient(
-                    listOf(MaterialTheme.colorScheme.primary, GreenAccentLight),
-                ),
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            imageVector = Icons.Rounded.QrCodeScanner,
-            contentDescription = null,
-            modifier = Modifier.size(iconSize),
-            tint = MaterialTheme.colorScheme.onPrimary,
-        )
+    var expanded by remember { mutableStateOf(false) }
+
+    Box(modifier = modifier) {
+        Surface(
+            onClick = { expanded = true },
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.surface,
+            shadowElevation = 2.dp,
+            modifier = Modifier.semantics {
+                contentDescription = "Country filter, ${selected.displayName}"
+            },
+        ) {
+            Row(
+                modifier = Modifier
+                    .heightIn(min = 34.dp)
+                    .padding(start = 12.dp, end = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = selected.displayName,
+                    style = MaterialTheme.typography.labelLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 110.dp),
+                )
+                Icon(
+                    imageVector = Icons.Rounded.ArrowDropDown,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            shape = MaterialTheme.shapes.medium,
+        ) {
+            SearchCountry.OPTIONS.forEach { country ->
+                DropdownMenuItem(
+                    text = { Text(country.displayName) },
+                    onClick = {
+                        expanded = false
+                        onSelect(country)
+                    },
+                    trailingIcon = {
+                        if (country == selected) {
+                            Icon(
+                                imageVector = Icons.Rounded.Check,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                    },
+                )
+            }
+        }
     }
 }
 
@@ -339,27 +447,7 @@ private fun IntroContent(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Box(
-            modifier = Modifier
-                .size(84.dp)
-                .clip(RoundedCornerShape(26.dp))
-                .background(
-                    Brush.linearGradient(
-                        listOf(
-                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.9f),
-                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
-                        ),
-                    ),
-                ),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = Icons.Rounded.QrCodeScanner,
-                contentDescription = null,
-                modifier = Modifier.size(38.dp),
-                tint = MaterialTheme.colorScheme.primary,
-            )
-        }
+        AppLogo(size = 88.dp)
         Spacer(Modifier.height(22.dp))
         Text(
             text = "FoodFit Scan",
@@ -439,11 +527,25 @@ private fun SearchResults(
     items: List<ProductSearchItem>,
     onOpenProduct: (String) -> Unit,
 ) {
+    val nativeAdLoader = rememberNativeAdLoader(AdConfig.nativeAdUnitId)
+    val rows = remember(items) { SearchAdPlacement.buildRows(items) }
+
+    // Start loading every planned ad slot (max 3) as soon as results arrive.
+    LaunchedEffect(rows) {
+        rows.filterIsInstance<SearchRow.Ad>().forEach { nativeAdLoader.ensureLoaded(it.slot) }
+    }
+
+    // An ad row only becomes visible once its ad is actually loaded, so loading/failed slots
+    // never leave gaps or empty placeholders between product results.
+    val visibleRows = rows.filter { row ->
+        row !is SearchRow.Ad || nativeAdLoader.stateFor(row.slot) is NativeAdSlotState.Loaded
+    }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(10.dp),
         // Extra bottom padding keeps the last card clear of the settings FAB.
-        contentPadding = PaddingValues(top = 14.dp, bottom = 96.dp),
+        contentPadding = PaddingValues(top = 10.dp, bottom = 96.dp),
     ) {
         item(key = "resultCount") {
             Text(
@@ -453,8 +555,30 @@ private fun SearchResults(
                 modifier = Modifier.padding(start = 4.dp, bottom = 2.dp),
             )
         }
-        items(items, key = { it.barcode }) { item ->
-            ProductResultCard(item = item, onClick = { onOpenProduct(item.barcode) })
+        items(
+            items = visibleRows,
+            key = { row ->
+                when (row) {
+                    is SearchRow.Product -> row.item.barcode
+                    is SearchRow.Ad -> "nativeAd:${row.slot}"
+                }
+            },
+            contentType = { row -> if (row is SearchRow.Ad) "nativeAd" else "product" },
+        ) { row ->
+            when (row) {
+                is SearchRow.Product ->
+                    ProductResultCard(
+                        item = row.item,
+                        onClick = { onOpenProduct(row.item.barcode) },
+                    )
+
+                is SearchRow.Ad -> {
+                    val state = nativeAdLoader.stateFor(row.slot)
+                    if (state is NativeAdSlotState.Loaded) {
+                        NativeAdCard(nativeAd = state.ad)
+                    }
+                }
+            }
         }
     }
 }
@@ -544,7 +668,7 @@ private fun LoadingSkeleton(rowCount: Int = 6) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(top = 14.dp)
+            .padding(top = 10.dp)
             .alpha(alpha),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {

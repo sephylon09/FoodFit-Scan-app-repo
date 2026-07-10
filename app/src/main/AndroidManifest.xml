@@ -16,6 +16,20 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.FoodFitScan">
+
+        <!-- AdMob app ID; the value is injected per build type from app/build.gradle.kts
+             (debug -> Google sample app ID, closedTesting/release -> real app ID). -->
+        <meta-data
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="${admobAppId}" />
+        <!-- Let the Mobile Ads SDK initialize and load ads on background threads. -->
+        <meta-data
+            android:name="com.google.android.gms.ads.flag.OPTIMIZE_INITIALIZATION"
+            android:value="true" />
+        <meta-data
+            android:name="com.google.android.gms.ads.flag.OPTIMIZE_AD_LOADING"
+            android:value="true" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

@@ -6,6 +6,7 @@ import com.sephylon.foodfitscan.domain.model.NutritionFacts
 import com.sephylon.foodfitscan.domain.model.ProductDetails
 import com.sephylon.foodfitscan.domain.model.ProductLookupResult
 import com.sephylon.foodfitscan.domain.model.ScanHistoryItem
+import com.sephylon.foodfitscan.domain.model.SearchCountry
 import com.sephylon.foodfitscan.domain.model.UserFoodPreferences
 import com.sephylon.foodfitscan.domain.repository.PreferenceRepository
 import com.sephylon.foodfitscan.domain.repository.ProductRepository
@@ -100,6 +101,39 @@ class ProductDetailViewModelTest {
     }
 
     @Test
+    fun `onProductViewed fires exactly once when a product loads successfully`() =
+        runTest(testDispatcher) {
+            val product = sampleProduct()
+            var viewedCount = 0
+            val vm = ProductDetailViewModel(
+                barcode = product.barcode,
+                productRepository = FakeProductRepository(lookupResult = ProductLookupResult.Found(product)),
+                preferenceRepository = FakePreferenceRepo(),
+                onProductViewed = { viewedCount++ },
+            )
+            advanceUntilIdle()
+            assertEquals(1, viewedCount)
+
+            // A retry on the same screen must not count as a second product view.
+            vm.retry()
+            advanceUntilIdle()
+            assertEquals(1, viewedCount)
+        }
+
+    @Test
+    fun `onProductViewed does not fire when the lookup fails`() = runTest(testDispatcher) {
+        var viewedCount = 0
+        ProductDetailViewModel(
+            barcode = "invalid",
+            productRepository = FakeProductRepository(lookupResult = ProductLookupResult.NotFound("invalid")),
+            preferenceRepository = FakePreferenceRepo(),
+            onProductViewed = { viewedCount++ },
+        )
+        advanceUntilIdle()
+        assertEquals(0, viewedCount)
+    }
+
+    @Test
     fun `loadAlternatives returns Success with alternatives`() = runTest(testDispatcher) {
         val product = sampleProduct()
         val successResult = AlternativesResult.Success(emptyList())
@@ -159,6 +193,7 @@ private class FakePreferenceRepo(
 ) : PreferenceRepository {
     private val _flow = MutableStateFlow(initial)
     private val _nutritionFields = MutableStateFlow(NutritionDisplayOption.DEFAULT_KEYS)
+    private val _searchCountry = MutableStateFlow<SearchCountry?>(null)
     override fun getUserPreferences(): Flow<UserFoodPreferences> = _flow
     override suspend fun saveUserPreferences(preferences: UserFoodPreferences) {
         _flow.value = preferences
@@ -168,5 +203,9 @@ private class FakePreferenceRepo(
     override fun observeSelectedNutritionFields(): Flow<Set<String>> = _nutritionFields
     override suspend fun saveSelectedNutritionFields(fields: Set<String>) {
         _nutritionFields.value = fields.ifEmpty { NutritionDisplayOption.DEFAULT_KEYS }
+    }
+    override fun observeSearchCountry(): Flow<SearchCountry?> = _searchCountry
+    override suspend fun saveSearchCountry(country: SearchCountry) {
+        _searchCountry.value = country
     }
 }

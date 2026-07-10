@@ -2,6 +2,7 @@ package com.sephylon.foodfitscan.ui.settings
 
 import com.sephylon.foodfitscan.domain.model.AllergenOption
 import com.sephylon.foodfitscan.domain.model.NutritionDisplayOption
+import com.sephylon.foodfitscan.domain.model.SearchCountry
 import com.sephylon.foodfitscan.domain.model.UserFoodPreferences
 import com.sephylon.foodfitscan.domain.repository.PreferenceRepository
 import kotlinx.coroutines.Dispatchers
@@ -334,6 +335,7 @@ private class FakePreferenceRepository(
     private val _prefs = MutableStateFlow(initial)
     private val _onboardingCompleted = MutableStateFlow(false)
     private val _nutritionFields = MutableStateFlow(initialNutritionFields)
+    private val _searchCountry = MutableStateFlow<SearchCountry?>(null)
     var savedPreferences: UserFoodPreferences? = null
     var savedNutritionFields: Set<String>? = null
 
@@ -356,5 +358,11 @@ private class FakePreferenceRepository(
         savedNutritionFields = fields
         // Mirror the real repository fallback: an empty saved set resolves to defaults.
         _nutritionFields.value = fields.ifEmpty { NutritionDisplayOption.DEFAULT_KEYS }
+    }
+
+    override fun observeSearchCountry(): Flow<SearchCountry?> = _searchCountry
+
+    override suspend fun saveSearchCountry(country: SearchCountry) {
+        _searchCountry.value = country
     }
 }

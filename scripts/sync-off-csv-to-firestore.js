@@ -7,8 +7,21 @@ const readline = require("readline");
 const COLLECTION_NAME = "product_search_index";
 const SYNC_STATE_COLLECTION = "sync_state";
 const SYNC_STATE_DOC = "open_food_facts_country_rotation";
+// Image backfill keeps its own cursor so it can re-pass the CSV from row 0 without
+// disturbing the country-rotation cursor a normal sync depends on.
+const IMAGE_BACKFILL_STATE_DOC = "open_food_facts_image_backfill";
 
 const CSV_URL = "https://static.openfoodfacts.org/data/en.openfoodfacts.org.products.csv.gz";
+
+// Run modes, selected with CSV_SYNC_MODE. Anything unrecognised is a hard error rather
+// than a silent fallback, so a typo in the workflow input can never run the wrong mode.
+const MODE_NORMAL = "normal";
+const MODE_RESET_SINGAPORE = "reset-singapore";
+const MODE_IMAGE_BACKFILL = "image-backfill";
+const MODES = [MODE_NORMAL, MODE_RESET_SINGAPORE, MODE_IMAGE_BACKFILL];
+
+// reset-singapore is destructive; it only runs when this exact string is supplied.
+const RESET_CONFIRMATION = "RESET";
 
 // Priority rotation. Many products sold in Singapore supermarkets / convenience
 // stores are tagged under a neighbouring or major-import country rather than
@@ -42,6 +55,19 @@ const MAX_ROWS_TO_SCAN_PER_CHUNK = 250000;
 const BATCH_SIZE = 450;
 const HEARTBEAT_ROW_INTERVAL = 25000;
 const CURSOR_SKIP_LOG_INTERVAL = 250000;
+
+// Deletion is paginated: each round reads at most this many document refs, deletes them,
+// then re-queries. The full collection is never held in memory.
+const DELETE_BATCH_SIZE = 300;
+
+// Image backfill resolves candidate barcodes in groups so it can skip products that are
+// not in the index (and those that already have an image) without a read per row.
+const IMAGE_BACKFILL_LOOKUP_GROUP = 300;
+
+// Each index lookup is a billed Firestore read, so a backfill chunk ends after this many
+// candidates even if it has written nothing. Without it, one chunk could read the whole
+// index looking for the handful of documents that still lack an image.
+const MAX_IMAGE_BACKFILL_LOOKUPS_PER_CHUNK = 5000;
 
 // Manual bulk sync. Scheduled cron has been unreliable, so one execution can
 // process up to MAX_CHUNKS_PER_RUN sequential chunks — advancing the importer
@@ -99,6 +125,30 @@ function getChunksPerRun() {
   }
 
   return Math.min(parsed, MAX_CHUNKS_PER_RUN);
+}
+
+// Missing / blank → "normal". Case and surrounding whitespace are forgiven; an
+// unrecognised value throws so the run fails instead of quietly syncing.
+function parseMode(rawMode) {
+  const value = String(rawMode === undefined || rawMode === null ? "" : rawMode)
+    .trim()
+    .toLowerCase();
+
+  if (value.length === 0) {
+    return MODE_NORMAL;
+  }
+
+  if (!MODES.includes(value)) {
+    throw new Error(`Unknown sync mode: "${rawMode}". Expected one of: ${MODES.join(", ")}`);
+  }
+
+  return value;
+}
+
+// Deliberately exact: no trimming, no case folding. "reset", " RESET " and "Reset" all
+// fail, so the destructive path cannot be reached by an approximate answer.
+function isResetConfirmed(rawConfirmation) {
+  return rawConfirmation === RESET_CONFIRMATION;
 }
 
 function normalizeCountryIndex(rawIndex) {
@@ -217,6 +267,19 @@ function splitTags(value) {
 
 function rowMatchesCountry(row, countryTag) {
   return splitTags(row.countries_tags).includes(countryTag);
+}
+
+// The index only ever contains products from COUNTRY_ROTATION, so image backfill can
+// ignore every other row without a Firestore read.
+function rowMatchesAnyRotationCountry(row) {
+  const tags = splitTags(row.countries_tags);
+  return COUNTRY_ROTATION.some((countryTag) => tags.includes(countryTag));
+}
+
+// Substring pre-filter for the above: cheap, may produce false positives (which
+// rowMatchesAnyRotationCountry then rejects), never false negatives.
+function lineMayMatchRotationCountry(line) {
+  return COUNTRY_ROTATION.some((countryTag) => line.includes(countryTag));
 }
 
 // First non-empty image column by IMAGE_COLUMN_PRIORITY, trimmed. Values that
@@ -743,73 +806,450 @@ async function processCountryStream(db, options) {
   };
 }
 
-// Manual image-backfill helper: rewinds every country cursor to row 0 (keeping
-// totals and rotation history) so the following chunks re-pass rows that were
-// imported before image support and merge imageUrl into those existing docs.
-// Never deletes documents; only the sync_state cursor doc is touched. Opt-in
-// via CSV_SYNC_RESET_CURSORS=true on a manual run — default behavior unchanged.
-async function resetRotationCursors(db) {
-  const ref = db.collection(SYNC_STATE_COLLECTION).doc(SYNC_STATE_DOC);
+// ── reset-singapore ─────────────────────────────────────────────────────────
+//
+// Deletes every document in the collection, one bounded page at a time. Each round
+// re-queries the collection head: the previous page's documents are gone, so the query
+// naturally advances without a cursor and the process never holds more than
+// `batchSize` refs. Returns the number of documents deleted.
+async function deleteCollectionInBatches(db, collectionName, batchSize = DELETE_BATCH_SIZE) {
+  let totalDeleted = 0;
+  let round = 0;
+
+  for (;;) {
+    const snapshot = await db.collection(collectionName).limit(batchSize).get();
+    const docs = snapshot.docs || [];
+
+    if (docs.length === 0) {
+      break;
+    }
+
+    const batch = db.batch();
+    for (const doc of docs) {
+      batch.delete(doc.ref);
+    }
+    await batch.commit();
+
+    totalDeleted += docs.length;
+    round++;
+    console.log(
+      `Deleted page #${round} from ${collectionName}: ${docs.length} docs (total deleted: ${totalDeleted})`
+    );
+
+    // A short page means the collection head is exhausted.
+    if (docs.length < batchSize) {
+      break;
+    }
+  }
+
+  return totalDeleted;
+}
+
+// The exact rotation state a fresh Singapore-first import starts from. Written with
+// set() and NO merge, so stale per-country progress from the previous dataset cannot
+// survive the reset.
+function buildSingaporeResetState(now = Date.now()) {
+  const singapore = COUNTRY_ROTATION[0];
+
+  return {
+    currentCountryIndex: 0,
+    currentCountryTag: singapore,
+    currentCountryLastProcessedRow: 0,
+    totalSavedAllCountries: 0,
+    countryProgress: {
+      [singapore]: {
+        lastProcessedRow: 0,
+        totalSaved: 0,
+        completedFullPass: false,
+      },
+    },
+    lastResult: "reset_to_singapore",
+    lastRunAt: now,
+    lastWritten: 0,
+    lastScannedRows: 0,
+    lastMatchedRows: 0,
+    lastSkipped: 0,
+    completedCountryThisRun: false,
+    sourceUrl: CSV_URL,
+  };
+}
+
+// Destructive. Empties product_search_index, clears both sync_state cursors, and rewrites
+// the rotation cursor so the NEXT normal run starts at Singapore, row 0 (i.e. the first
+// row it reads is CSV row 1). Imports nothing itself — reset and import stay separate so
+// a reset run cannot half-succeed.
+async function runResetToSingapore(db, confirmation) {
+  if (!isResetConfirmed(confirmation)) {
+    throw new Error(
+      `Refusing to reset: confirm_reset must be exactly "${RESET_CONFIRMATION}". ` +
+        "Nothing was deleted."
+    );
+  }
+
+  console.log(`Confirmation accepted. Deleting every document in ${COLLECTION_NAME}…`);
+
+  const deletedCount = await deleteCollectionInBatches(db, COLLECTION_NAME);
+  console.log(`Deletes committed: ${deletedCount} documents removed from ${COLLECTION_NAME}.`);
+
+  // Remove the optional backfill cursor so a later image-backfill run starts from row 0
+  // against the rebuilt index. delete() on a missing document is a no-op.
+  await db.collection(SYNC_STATE_COLLECTION).doc(IMAGE_BACKFILL_STATE_DOC).delete();
+  console.log(`Cleared sync_state/${IMAGE_BACKFILL_STATE_DOC} (if it existed).`);
+
+  const resetState = buildSingaporeResetState();
+  await db.collection(SYNC_STATE_COLLECTION).doc(SYNC_STATE_DOC).set(resetState);
+
+  console.log(`Reset sync_state/${SYNC_STATE_DOC}:`);
+  console.log(`  currentCountryIndex     = ${resetState.currentCountryIndex}`);
+  console.log(`  currentCountryTag       = ${resetState.currentCountryTag}`);
+  console.log(`  ${resetState.currentCountryTag}.lastProcessedRow  = 0`);
+  console.log(`  ${resetState.currentCountryTag}.totalSaved        = 0`);
+  console.log(`  ${resetState.currentCountryTag}.completedFullPass = false`);
+  console.log(`  totalSavedAllCountries  = 0`);
+  console.log(`  lastResult              = ${resetState.lastResult}`);
+  console.log(`  lastRunAt               = ${new Date(resetState.lastRunAt).toISOString()}`);
+  console.log(
+    `\nReset complete. No products were imported this run. Run the workflow again with ` +
+      `mode=normal to rebuild the index from ${resetState.currentCountryTag}, row 1.`
+  );
+
+  return { deletedCount, resetState };
+}
+
+// ── image-backfill ──────────────────────────────────────────────────────────
+
+// Merge payload for one already-indexed product. Only ever called with a non-empty
+// imageUrl, so a merge write can never replace a stored image with null.
+function buildImageBackfillUpdate(imageUrl, now = Date.now()) {
+  return {
+    imageUrl,
+    updatedAt: now,
+    imageBackfilledAt: now,
+    imageSource: "openfoodfacts-csv",
+  };
+}
+
+async function getImageBackfillState(db) {
+  const ref = db.collection(SYNC_STATE_COLLECTION).doc(IMAGE_BACKFILL_STATE_DOC);
   const snap = await ref.get();
   const data = snap.exists ? snap.data() || {} : {};
 
-  const countryProgress =
-    data.countryProgress && typeof data.countryProgress === "object"
-      ? data.countryProgress
-      : {};
+  const lastProcessedRow = Number(data.lastProcessedRow || 0);
 
-  const resetProgress = {};
-  for (const [tag, progress] of Object.entries(countryProgress)) {
-    resetProgress[tag] = {
-      ...(progress && typeof progress === "object" ? progress : {}),
-      lastProcessedRow: 0,
-      completedFullPass: false,
-    };
-  }
-
-  await ref.set(
-    {
-      currentCountryIndex: 0,
-      currentCountryTag: COUNTRY_ROTATION[0],
-      currentCountryLastProcessedRow: 0,
-      countryProgress: resetProgress,
-      lastResult: "cursors_reset_for_backfill",
-      lastRunAt: Date.now(),
-    },
-    { merge: true }
-  );
-
-  console.log("Rotation cursors reset: upcoming chunks re-pass all rows (image backfill).");
+  return {
+    lastProcessedRow: Number.isFinite(lastProcessedRow) && lastProcessedRow > 0 ? lastProcessedRow : 0,
+    totalUpdated: Number(data.totalUpdated || 0),
+    completedFullPass: data.completedFullPass === true,
+  };
 }
 
-function shouldResetCursors() {
-  return (process.env.CSV_SYNC_RESET_CURSORS || "").trim().toLowerCase() === "true";
-}
+async function saveImageBackfillState(db, fields) {
+  const payload = {
+    lastProcessedRow: fields.lastProcessedRow,
+    totalUpdated: fields.totalUpdated,
+    completedFullPass: fields.completedFullPass,
+    lastResult: fields.lastResult,
+    lastRunAt: Date.now(),
+    lastScannedRows: fields.lastScannedRows,
+    lastUpdated: fields.lastUpdated,
+    lastSkipped: fields.lastSkipped,
+    sourceUrl: CSV_URL,
+  };
 
-async function runCsvSync() {
-  const db = initializeFirebase();
-  const userAgent = requireEnv("OPEN_FOOD_FACTS_USER_AGENT");
-  const maxWrites = getMaxWrites();
-  const maxRows = MAX_ROWS_TO_SCAN_PER_CHUNK;
-  const chunksPerRun = getChunksPerRun();
-
-  if (shouldResetCursors()) {
-    await resetRotationCursors(db);
+  if (fields.lastError) {
+    payload.lastError = fields.lastError;
   }
 
-  const rawChunksRequested = Number.parseInt(
-    process.env.CSV_SYNC_CHUNKS_PER_RUN || String(DEFAULT_CHUNKS_PER_RUN),
-    10
-  );
-  const chunksRequested = Number.isFinite(rawChunksRequested) && rawChunksRequested > 0
-    ? rawChunksRequested
-    : DEFAULT_CHUNKS_PER_RUN;
+  await db
+    .collection(SYNC_STATE_COLLECTION)
+    .doc(IMAGE_BACKFILL_STATE_DOC)
+    .set(payload, { merge: true });
+}
 
-  console.log("Starting Open Food Facts CSV → Firestore country-rotation sync (bulk chunk mode)");
-  console.log(`CSV URL: ${CSV_URL}`);
-  console.log(`Collection: ${COLLECTION_NAME}`);
-  console.log(`Chunks requested: ${chunksRequested}`);
-  console.log(`Chunks capped to: ${chunksPerRun} (max ${MAX_CHUNKS_PER_RUN})`);
+// Streams the CSV once and merges imageUrl into documents that already exist in
+// product_search_index and do not have one yet. Never creates or deletes documents, and
+// never touches the country-rotation cursor. Candidate barcodes are resolved in groups
+// (one getAll per group) rather than one read per row.
+async function runImageBackfill(db, options) {
+  const { userAgent, maxUpdates, maxRows, chunksPerRun } = options;
+
+  const state = await getImageBackfillState(db);
+  const startAfterRow = state.lastProcessedRow;
+
+  console.log(`State doc: sync_state/${IMAGE_BACKFILL_STATE_DOC}`);
+  console.log(`Start row: ${startAfterRow}`);
+  console.log(`Max image updates per chunk: ${maxUpdates}`);
+  console.log(`Max rows to scan per chunk: ${maxRows}`);
+  if (state.completedFullPass) {
+    console.log("Previous backfill pass completed; this run re-passes the CSV from row 0.");
+  }
+
+  let rowNumber = 0;
+  let scannedThisRun = 0;
+  let updatedThisRun = 0;
+  let skippedThisRun = 0;
+  let scannedThisChunk = 0;
+  let updatedThisChunk = 0;
+  let lookupsThisChunk = 0;
+  let chunksCompletedHere = 0;
+  let batchesCommitted = 0;
+  let streamError = null;
+  let stopReason = null;
+
+  // barcode -> imageUrl, awaiting an existence/imageUrl check. A Map (not an array) so a
+  // barcode repeated inside one group cannot send duplicate refs to getAll().
+  let candidates = new Map();
+  let batch = db.batch();
+  let batchCount = 0;
+
+  async function commitCurrentBatch(label) {
+    const committingBatch = batch;
+    const committingCount = batchCount;
+
+    batch = db.batch();
+    batchCount = 0;
+
+    if (committingCount === 0) return;
+
+    try {
+      await committingBatch.commit();
+    } catch (error) {
+      error.isPersistenceFailure = true;
+      throw error;
+    }
+
+    batchesCommitted++;
+    console.log(
+      `Committed ${label} batch #${batchesCommitted}: writes=${committingCount}, row=${rowNumber}, scanned=${scannedThisRun}, updated=${updatedThisRun}, skipped=${skippedThisRun}`
+    );
+
+    try {
+      await saveImageBackfillState(db, {
+        lastProcessedRow: rowNumber,
+        totalUpdated: state.totalUpdated + updatedThisRun,
+        completedFullPass: false,
+        lastResult: "partial_progress",
+        lastScannedRows: scannedThisRun,
+        lastUpdated: updatedThisRun,
+        lastSkipped: skippedThisRun,
+      });
+    } catch (error) {
+      error.isPersistenceFailure = true;
+      throw error;
+    }
+  }
+
+  // Resolves a group of candidate barcodes against the index and queues merge updates
+  // for the ones that exist and are missing an image. Documents that are absent from the
+  // index are skipped: backfill must never create new documents.
+  async function flushCandidates() {
+    if (candidates.size === 0) return;
+
+    const group = Array.from(candidates.entries());
+    candidates = new Map();
+
+    const refs = group.map(([barcode]) => db.collection(COLLECTION_NAME).doc(barcode));
+    const snapshots = await db.getAll(...refs, { fieldMask: ["imageUrl"] });
+
+    for (let i = 0; i < snapshots.length; i++) {
+      const snapshot = snapshots[i];
+      const [, imageUrl] = group[i];
+
+      const existingImageUrl = snapshot.exists ? snapshot.get("imageUrl") : undefined;
+      const alreadyHasImage =
+        typeof existingImageUrl === "string" && existingImageUrl.trim().length > 0;
+
+      if (!snapshot.exists || alreadyHasImage) {
+        skippedThisRun++;
+        continue;
+      }
+
+      batch.set(refs[i], buildImageBackfillUpdate(imageUrl), { merge: true });
+      batchCount++;
+      updatedThisRun++;
+      updatedThisChunk++;
+
+      if (batchCount >= BATCH_SIZE) {
+        await commitCurrentBatch("progress");
+      }
+    }
+  }
+
+  async function saveChunkBoundary({ completed, error }) {
+    const chunkNumber = chunksCompletedHere + 1;
+    const cursorRow = completed ? 0 : Math.max(rowNumber, startAfterRow);
+
+    await saveImageBackfillState(db, {
+      lastProcessedRow: cursorRow,
+      totalUpdated: state.totalUpdated + updatedThisRun,
+      completedFullPass: completed === true,
+      lastResult: error ? "stopped_or_error" : completed ? "success" : "partial_progress",
+      lastScannedRows: scannedThisChunk,
+      lastUpdated: updatedThisChunk,
+      lastSkipped: skippedThisRun,
+      lastError: error ? error.message : undefined,
+    });
+
+    console.log(
+      `Chunk ${chunkNumber} ${error ? "stopped" : "complete"}: updated=${updatedThisChunk}, scanned=${scannedThisChunk}, savedCursor=${cursorRow}${
+        completed ? " (full CSV pass done)" : ""
+      }`
+    );
+  }
+
+  const response = await openUrlWithRedirects(CSV_URL, userAgent);
+  const gunzip = zlib.createGunzip();
+
+  const lines = readline.createInterface({
+    input: response.pipe(gunzip),
+    crlfDelay: Infinity,
+  });
+
+  let inputError = null;
+  let closingStreams = false;
+  const failInput = (error) => {
+    if (closingStreams) return;
+    if (!inputError) inputError = error;
+    lines.close();
+  };
+  response.on("error", failInput);
+  gunzip.on("error", failInput);
+
+  let columnIndexes = null;
+
+  try {
+    for await (const line of lines) {
+      if (columnIndexes === null) {
+        columnIndexes = buildColumnIndexes(line);
+        continue;
+      }
+
+      rowNumber++;
+
+      if (rowNumber <= startAfterRow) {
+        if (rowNumber % CURSOR_SKIP_LOG_INTERVAL === 0) {
+          console.log(`Skipping to cursor: row=${rowNumber} of ${startAfterRow}`);
+        }
+        continue;
+      }
+
+      scannedThisChunk++;
+      scannedThisRun++;
+
+      if (scannedThisRun % HEARTBEAT_ROW_INTERVAL === 0) {
+        console.log(
+          `Still scanning: row=${rowNumber}, scannedChunk=${scannedThisChunk}, updated=${updatedThisRun}, skipped=${skippedThisRun}`
+        );
+      }
+
+      // Cheap pre-filters: a row can only contribute an image if it carries a URL, and
+      // it can only be in the index if it is tagged with a rotation country. Skipping
+      // everything else keeps the read bill proportional to the index, not to the CSV.
+      if (line.includes("http") && lineMayMatchRotationCountry(line)) {
+        const row = parseRow(line, columnIndexes);
+        const barcode = String(row.code || "").trim();
+        const imageUrl = getBestImageUrl(row);
+
+        if (barcode && imageUrl && rowMatchesAnyRotationCountry(row)) {
+          candidates.set(barcode, imageUrl);
+          lookupsThisChunk++;
+
+          if (candidates.size >= IMAGE_BACKFILL_LOOKUP_GROUP) {
+            await flushCandidates();
+          }
+        }
+      }
+
+      const hitUpdateCap = updatedThisChunk >= maxUpdates;
+      const hitLookupCap = lookupsThisChunk >= MAX_IMAGE_BACKFILL_LOOKUPS_PER_CHUNK;
+      const hitRowCap = scannedThisChunk >= maxRows;
+
+      if (hitUpdateCap || hitLookupCap || hitRowCap) {
+        console.log(
+          hitUpdateCap
+            ? `Chunk hit max image updates (${maxUpdates}) at row=${rowNumber}.`
+            : hitLookupCap
+              ? `Chunk hit max index lookups (${MAX_IMAGE_BACKFILL_LOOKUPS_PER_CHUNK}) at row=${rowNumber}.`
+              : `Chunk hit max scanned rows (${maxRows}) at row=${rowNumber}.`
+        );
+
+        await flushCandidates();
+        await commitCurrentBatch("chunk");
+        await saveChunkBoundary({ completed: false });
+        chunksCompletedHere++;
+
+        if (chunksCompletedHere >= chunksPerRun) {
+          stopReason = "budget";
+          break;
+        }
+
+        scannedThisChunk = 0;
+        updatedThisChunk = 0;
+        lookupsThisChunk = 0;
+      }
+    }
+  } catch (error) {
+    if (error && (error.isPersistenceFailure || error.isFatalHeaderError)) {
+      throw error;
+    }
+    streamError = error;
+  } finally {
+    closingStreams = true;
+    lines.close();
+    response.destroy();
+    gunzip.destroy();
+  }
+
+  if (!streamError && inputError) {
+    streamError = inputError;
+  }
+
+  if (streamError) {
+    await flushCandidates();
+    await commitCurrentBatch("final");
+    await saveChunkBoundary({ completed: false, error: streamError });
+    chunksCompletedHere++;
+    stopReason = "error";
+    console.log(`CSV stream stopped: ${streamError.message}`);
+  } else if (stopReason === "budget") {
+    // The chunk that exhausted the budget already saved its boundary above.
+  } else {
+    await flushCandidates();
+    await commitCurrentBatch("final");
+    await saveChunkBoundary({ completed: true });
+    chunksCompletedHere++;
+    stopReason = "completed";
+  }
+
+  const completedFullPass = stopReason === "completed";
+  const finalCursorRow = completedFullPass ? 0 : Math.max(rowNumber, startAfterRow);
+
+  console.log("\nImage backfill complete.");
+  console.log(`Chunks completed: ${chunksCompletedHere} of ${chunksPerRun} requested`);
+  console.log(`Rows scanned: ${scannedThisRun}`);
+  console.log(`Image updates committed: ${updatedThisRun} (batches: ${batchesCommitted})`);
+  console.log(`Rows skipped (not indexed / already had an image): ${skippedThisRun}`);
+  console.log(`Final cursor row: ${finalCursorRow}`);
+  console.log(`Completed full pass: ${completedFullPass}`);
+
+  return {
+    chunksCompletedHere,
+    scannedThisRun,
+    updatedThisRun,
+    skippedThisRun,
+    finalCursorRow,
+    completedFullPass,
+    streamError,
+    batchesCommitted,
+  };
+}
+
+// ── normal ──────────────────────────────────────────────────────────────────
+
+async function runNormalSync(db, options) {
+  const { userAgent, maxWrites, maxRows, chunksPerRun } = options;
+
+  console.log(`State doc: sync_state/${SYNC_STATE_DOC}`);
   console.log(`Max writes per chunk: ${maxWrites}`);
   console.log(`Max rows to scan per chunk: ${maxRows}`);
 
@@ -876,11 +1316,73 @@ async function runCsvSync() {
   if (runStreamError) {
     console.log(`Ended early due to stream error: ${runStreamError.message}`);
   }
+
+  return { chunksCompleted, totalWrittenAllChunks, finalCountryTag, finalCursorRow };
+}
+
+// ── entry point ─────────────────────────────────────────────────────────────
+
+async function runCsvSync() {
+  const mode = parseMode(process.env.CSV_SYNC_MODE);
+  const db = initializeFirebase();
+
+  console.log("Starting Open Food Facts CSV → Firestore job");
+  console.log(`Selected mode: ${mode}`);
+  console.log(`CSV URL: ${CSV_URL}`);
+  console.log(`Collection: ${COLLECTION_NAME}`);
+
+  if (mode === MODE_RESET_SINGAPORE) {
+    // Never streams the CSV: reset only clears Firestore and rewrites the cursor.
+    await runResetToSingapore(db, process.env.CSV_SYNC_CONFIRM_RESET);
+    return;
+  }
+
+  const userAgent = requireEnv("OPEN_FOOD_FACTS_USER_AGENT");
+  const maxWrites = getMaxWrites();
+  const maxRows = MAX_ROWS_TO_SCAN_PER_CHUNK;
+  const chunksPerRun = getChunksPerRun();
+
+  const rawChunksRequested = Number.parseInt(
+    process.env.CSV_SYNC_CHUNKS_PER_RUN || String(DEFAULT_CHUNKS_PER_RUN),
+    10
+  );
+  const chunksRequested =
+    Number.isFinite(rawChunksRequested) && rawChunksRequested > 0
+      ? rawChunksRequested
+      : DEFAULT_CHUNKS_PER_RUN;
+
+  console.log(`Chunks requested: ${chunksRequested}`);
+  console.log(`Chunks capped to: ${chunksPerRun} (max ${MAX_CHUNKS_PER_RUN})`);
+
+  if (mode === MODE_IMAGE_BACKFILL) {
+    await runImageBackfill(db, {
+      userAgent,
+      maxUpdates: maxWrites,
+      maxRows,
+      chunksPerRun,
+    });
+    return;
+  }
+
+  await runNormalSync(db, { userAgent, maxWrites, maxRows, chunksPerRun });
 }
 
 module.exports = {
+  COLLECTION_NAME,
   COUNTRY_ROTATION,
   IMAGE_COLUMN_PRIORITY,
+  SYNC_STATE_COLLECTION,
+  SYNC_STATE_DOC,
+  IMAGE_BACKFILL_STATE_DOC,
+  MODE_NORMAL,
+  MODE_RESET_SINGAPORE,
+  MODE_IMAGE_BACKFILL,
+  MODES,
+  RESET_CONFIRMATION,
+  DELETE_BATCH_SIZE,
+  MAX_CHUNKS_PER_RUN,
+  parseMode,
+  isResetConfirmed,
   normalizeCountryIndex,
   getChunksPerRun,
   openUrlWithRedirects,
@@ -888,12 +1390,20 @@ module.exports = {
   buildPrefixes,
   splitTags,
   rowMatchesCountry,
+  rowMatchesAnyRotationCountry,
+  lineMayMatchRotationCountry,
   getBestImageUrl,
   compactProduct,
   buildWritePayload,
   buildColumnIndexes,
   parseRow,
+  deleteCollectionInBatches,
+  buildSingaporeResetState,
+  runResetToSingapore,
+  buildImageBackfillUpdate,
+  getImageBackfillState,
   processCountryStream,
+  runNormalSync,
   runCsvSync,
 };
 

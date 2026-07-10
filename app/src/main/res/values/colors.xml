@@ -7,4 +7,15 @@
     <color name="teal_700">#FF018786</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+
+    <!-- Native ad card (mirrors the Compose light color scheme; night values in values-night) -->
+    <color name="native_ad_surface">#FFFFFFFF</color>
+    <color name="native_ad_outline">#FFE4E8E3</color>
+    <color name="native_ad_text_primary">#FF181D1A</color>
+    <color name="native_ad_text_secondary">#FF5B625E</color>
+    <color name="native_ad_badge_bg">#FFEAF7EF</color>
+    <color name="native_ad_badge_text">#FF156136</color>
+    <color name="native_ad_cta_bg">#FF1E7B4B</color>
+    <color name="native_ad_cta_text">#FFFFFFFF</color>
+    <color name="native_ad_media_bg">#FFF1F4F0</color>
 </resources>

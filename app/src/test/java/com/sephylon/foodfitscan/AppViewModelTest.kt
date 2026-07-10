@@ -1,6 +1,7 @@
 package com.sephylon.foodfitscan
 
 import com.sephylon.foodfitscan.domain.model.NutritionDisplayOption
+import com.sephylon.foodfitscan.domain.model.SearchCountry
 import com.sephylon.foodfitscan.domain.model.UserFoodPreferences
 import com.sephylon.foodfitscan.domain.repository.PreferenceRepository
 import com.sephylon.foodfitscan.ui.navigation.Screen
@@ -70,6 +71,7 @@ private class FakePreferenceRepository(
     private val _prefs = MutableStateFlow(UserFoodPreferences())
     private val _onboarding = MutableStateFlow(onboardingCompleted)
     private val _nutritionFields = MutableStateFlow(NutritionDisplayOption.DEFAULT_KEYS)
+    private val _searchCountry = MutableStateFlow<SearchCountry?>(null)
 
     override fun getUserPreferences(): Flow<UserFoodPreferences> = _prefs
     override suspend fun saveUserPreferences(preferences: UserFoodPreferences) {
@@ -82,5 +84,9 @@ private class FakePreferenceRepository(
     override fun observeSelectedNutritionFields(): Flow<Set<String>> = _nutritionFields
     override suspend fun saveSelectedNutritionFields(fields: Set<String>) {
         _nutritionFields.value = fields.ifEmpty { NutritionDisplayOption.DEFAULT_KEYS }
+    }
+    override fun observeSearchCountry(): Flow<SearchCountry?> = _searchCountry
+    override suspend fun saveSearchCountry(country: SearchCountry) {
+        _searchCountry.value = country
     }
 }
